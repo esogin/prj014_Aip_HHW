@@ -1,0 +1,879 @@
+---
+title: "statistical_analysis_16SrRNA"
+author: "Maggie Sogin"
+date: "June 9 2026"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    toc_float: true
+---
+
+# Set up working space
+### Read in packages
+```{r}
+#load in packages and print versions 
+packages <- c("tidyverse", "ggplot2", "vegan", "phyloseq", "microbiome",
+               "ranacapa", "microViz", "patchwork", "pairwiseAdonis", "pheatmap","ALDEx2","emmeans")
+invisible(lapply(packages, function(pkg) {
+  library(pkg, character.only = TRUE)
+  cat(pkg, ":", as.character(packageVersion(pkg)), "\n")
+}))
+```
+### Set up plotting conditions
+```{r}
+#set up plotting conditions
+trt<-c("FASW","ABS","labrenzia","ruegeria","vibrio","ISOABC")
+myPal<-c('grey60','black','#A6CEE3','#1F78B4','#B2DF8A','violet')
+names(myPal) = trt
+
+dpis<-c("-1","0","1","4","14","21")
+shpPal<-c(0,15,11,13,5,1)
+names(shpPal) = dpis
+
+dpiPal<-c('black','gray30','seashell','seashell2','seashell3','seashell4')
+names(dpiPal) <- c('-1','0','1','4','14','21')
+
+theme_new<- theme_bw() + theme(panel.grid.major = element_line(color='gray90'), panel.grid.minor = element_line(color='gray90'), text= element_text(size = 15))
+```
+
+# Load and Manipulate Data
+
+set paths
+```{r}
+path.in<-"../data/16S"
+path.out<-"../output/16S"
+```
+
+
+```{r}
+ps.exp<-readRDS(file.path(path.in,'ps.exp.samples.rds'))
+ps.exp
+```
+fix taxa names
+```{r}
+ps.exp<-ps.exp %>%tax_fix()
+```
+
+## Sample sizes
+```{r}
+samps.sizes<-data.frame(sample_data(ps.exp)) %>% group_by(treatment, timepoint) %>% summarise(count=length(sample.names))
+samps.sizes %>% arrange(treatment, timepoint,count)
+```
+
+
+## Normalize phyloseq object
+
+```{r}
+ps.exp.agg<-ps.exp %>% tax_agg("Species")
+```
+
+## clr norm
+```{r}
+ps.clr<-ps.exp.agg %>%  tax_transform(trans="clr")
+```
+
+## rel abund norm
+```{r}
+ps.relAbund<-ps.exp.agg %>% 
+  tax_transform(trans="compositional") 
+```
+
+## rarefy data
+
+```{r}
+# 1. Extract OTU table and metadata
+otu_mat <- as.data.frame(otu_table(ps.exp.agg))
+metadata <- as(sample_data(ps.exp.agg), "data.frame")
+
+# 2. Calculate rarefaction for each sample
+rare_out <- rarecurve(otu_mat, step = 50, tidy = TRUE)
+
+# 3. Merge rarefaction data with your sample metadata
+rare_data <- rare_out %>%
+    rename(SampleID = Site, Reads = Sample, Observed_ASVs = Species) %>%
+    left_join(rownames_to_column(metadata, var = "SampleID"), by = "SampleID")
+
+# 4. Plot using ggplot2, coloring by your group (e.g., TreatmentGroup)
+ggplot(rare_data, aes(x = Reads, y = Observed_ASVs, group = SampleID, color = treatment)) +
+  geom_line(linewidth = 0.8, alpha = 0.7) +
+  theme_bw() +
+  labs(
+    x = "Number of Sequences",
+    y = "Observed Richness (ASVs/OTUs)",
+    color = "Sample Group"
+  ) + 
+  xlim(0,6000) + ylim(0,75)
+```
+
+
+```{r}
+set.seed(200)
+ps.exp.agg.reduced<-prune_samples(sample_sums(ps.exp.agg) >=4900, ps.exp.agg)
+samps.sizes<-data.frame(sample_data(ps.exp.agg.reduced)) %>% group_by(treatment, timepoint) %>% summarise(count=length(sample.names))
+samps.sizes %>% arrange(count)
+```
+```{r}
+set.seed(1245)
+ps.rare<- rarefy_even_depth(ps.exp.agg.reduced,rngseed = T)
+ps.rare
+```
+
+# Priority Effect Analysis
+Study design: 
+
+Anemones were treated with ABS solutions and then incoculated with one of the following: 
+- Isolate A - Labrenzia 
+- Isolate B - Reugeria 
+- Isolate C - Vibrio
+- All three isolates 
+- No isolates (ABS control)
+
+There were also anemones that were held in FASW for the entire experiment
+
+Priority effect logic:
+- Single-strain treatments represent "founder effects"
+- Does early establishment of one strain alter the final community composition compared to a null model (i.e., ABS or All three strains)?
+- A strong priority effect = single-strain communities diverge from the
+community treatment and resist convergence over time.
+
+Evidence for priority effects: 
+- Single strain inoculations remain compositionally distinct at day 21
+- PREMANOVA: Significant Time X Treatment Effect
+- 
+
+## Beta-diversity analysis
+Community composition over time 
+- Remove FASW samples from analysis 
+- Use rarefied data
+
+### rarefied data
+#### Ordination
+```{r}
+set.seed(1392)
+
+ps.analysis<-ps.rare  %>% ps_filter(dpi != "-1") #%>%  ps_filter(treatment != "FASW") 
+
+#reset factor level variables
+sample_data(ps.analysis)$timepoint<-factor(sample_data(ps.analysis)$timepoint,levels=c("post_priming","post_ABS","1dpi","4dpi",'14dpi','21dpi'), ordered=T)
+sample_data(ps.analysis)$dpi<-factor(sample_data(ps.analysis)$dpi,levels=c("-1","0","1","4","14","21"), ordered=T)
+sample_data(ps.analysis)$treatment<-factor(sample_data(ps.analysis)$treatment,levels=c('FASW', 'ABS' ,'ISOABC', 'labrenzia', 'ruegeria', 'vibrio'), ordered=T)
+
+#run ndms
+nmds.mod <- ps.analysis %>% 
+  dist_calc("bray") %>% 
+  ord_calc(method = "NMDS") # 
+#> Proportional min_prevalence given: 0.05 --> min 41/801 samples.
+nmds.mod
+nmds.mod@ord$stress
+```
+
+#####plot
+```{r}
+library(ggstar)
+# n1<-nmds.mod %>%
+#   ord_plot(shape=NA) + 
+#   #scale_shape_manual(values=shpPal)+
+#   theme_bw() +
+#   stat_chull(
+#     mapping = aes(colour = treatment, linetype = dpi,fill=treatment),
+#     linewidth = 0.5, alpha = 0.25, show.legend = FALSE)+
+#   geom_point(mapping=aes(color=treatment, shape=dpi),size=4,alpha=0.7)+
+#   scale_fill_manual(values=myPal)+
+#   scale_color_manual(values=myPal)+
+#   scale_shape_manual(values=shpPal, guide=guide_legend(reverse=T))+
+# n1
+
+n1 <- nmds.mod %>%
+ord_plot(shape=NA) +
+theme_bw() +
+stat_chull(
+mapping = aes(colour = treatment, linetype = dpi, fill = treatment),
+linewidth = 0.5, alpha = 0.25, show.legend = FALSE) +
+geom_star(mapping = aes(color = treatment, fill = treatment, starshape = dpi),
+size = 4, alpha = 0.7) +
+  scale_fill_manual(values = myPal) +
+scale_color_manual(values = myPal) +
+scale_starshape_manual(
+values = c(
+"0" = 15,
+"1"= 11,
+"4"= 13,
+"14" = 5,
+"21" = 1
+),
+guide = guide_legend(reverse = TRUE)
+)
+n1
+```
+facet by timepoint
+
+```{r}
+dpi_labels <- c("1" = "1 dpi", "4" = "4 dpi", "14" = "14 dpi", "21" = "21 dpi", "0"="0 dpi","-1"="pre-inc")
+
+n_s1 <- nmds.mod %>%
+  ord_plot(shape=NA) + 
+  scale_shape_manual(values=shpPal)+
+  theme_bw() +
+  stat_chull(
+    mapping = aes(colour = treatment, linetype = dpi,fill=treatment),
+    linewidth = 0.5, alpha = 0.25, show.legend = FALSE)+
+  geom_point(mapping=aes(color=treatment, shape=dpi),size=4,alpha=0.7)+
+  scale_fill_manual(values=myPal)+
+  scale_color_manual(values=myPal)+
+  scale_shape_manual(values=shpPal, guide=guide_legend(reverse=T))+
+  facet_grid(~ dpi,
+             labeller = labeller(dpi = dpi_labels)) +
+ theme(
+    strip.background = element_blank(),
+    strip.text       = element_text(face = "bold"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+n_s1
+```
+```{r}
+n_s1 <- nmds.mod %>%
+ord_plot(shape=NA) +
+theme_bw() +
+stat_chull(
+mapping = aes(colour = treatment, linetype = dpi, fill = treatment),
+linewidth = 0.5, alpha = 0.25, show.legend = FALSE) +
+geom_star(mapping = aes(color = treatment, fill = treatment, starshape = dpi),
+size = 4, alpha = 0.7) +
+  scale_fill_manual(values = myPal) +
+scale_color_manual(values = myPal) +
+scale_starshape_manual(
+values = c(
+"0" = 15,
+"1"= 11,
+"4"= 13,
+"14" = 5,
+"21" = 1
+),
+guide = guide_legend(reverse = TRUE)
+) + 
+  facet_grid(~ dpi,
+             labeller = labeller(dpi = dpi_labels)) + 
+   theme(
+    strip.background = element_blank(),
+    strip.text       = element_text(face = "bold"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+n_s1
+```
+
+
+#### PERMANOVA
+```{r}
+permanova<-ps.analysis %>% 
+  dist_calc("bray") %>% 
+  dist_permanova(
+    variables = c("treatment","dpi","treatment:dpi"),
+    n_perms = 9999, 
+    seed = 1392, complete_cases = TRUE, verbose = "max"
+  )
+```
+
+Significant interaction between treatment and time, suggests priority effects of microbial treatments
+```{r}
+print(permanova)
+```
+#### Pairwise PERMANOVA
+```{r}
+# Build distance matrix (samples as rows)
+tmp.pw <- as.data.frame(otu_table(ps.analysis))
+d.pw <- vegdist(tmp.pw, method = 'bray')
+
+# Get metadata aligned to distance matrix sample order
+mdf.pw <- data.frame(sample_data(ps.analysis))
+
+# Run pairwise PERMANOVA across treatment groups
+pw_results <- pairwise.adonis(d.pw, mdf.pw$treatment, p.adjust.m = "BH", perm = 999)
+pw_results %>% arrange(p.adjusted)
+```
+
+#### Comparison to null model 
+```{r}
+library(dplyr)
+library(tidyr)
+
+metadata<-data.frame(sample_data(ps.analysis)) %>% 
+          rownames_to_column("sample_id")
+
+# Convert distance matrix to long format
+bc_long<-as.matrix(dist_get(nmds.mod)) %>% 
+  as.data.frame() %>% rownames_to_column("sample1") %>%
+  pivot_longer(-sample1, names_to = "sample2", values_to = "bray_dist") %>% arrange(bray_dist,sample1)
+
+# 2. Identify FASW DPI at 0 reference samples
+fasw_ref_samples <- metadata %>%
+  filter(treatment == "FASW", dpi == '0') %>%
+  pull(sample_id)
+
+# 3. For each sample, calculate its mean BC distance to all FASW DPI 0
+mean_dist_to_ref <- bc_long %>%
+  filter(sample2 %in% fasw_ref_samples,  # only distances to reference samples
+         sample1 != sample2) %>%          # exclude self-comparisons
+  group_by(sample1) %>%
+  summarise(mean_dist_to_fasw_dpi0 = mean(bray_dist), .groups = "drop")
+
+# 4. Join with metadata
+result <- metadata %>%
+  left_join(mean_dist_to_ref, by = c("sample_id"= "sample1")) %>% 
+  mutate(dpi=forcats::fct_drop(dpi), treatment=fct_drop(treatment)) #%>% 
+  #mutate(dpi=as.vector(dpi),treatment=as.vector(treatment))
+
+str(result)
+```
+
+
+code here plots the average BC distance of each treatment group at each time point in comparison to T=0 FASW controls 
+
+```{r}
+bcd<-ggplot(result, aes(x=dpi, y=mean_dist_to_fasw_dpi0,fill=treatment, color=treatment)) + 
+  geom_boxplot(alpha=0.5, outlier.shape=NA,position = position_dodge2(preserve="single")) + 
+  geom_jitter(position = position_dodge2(0.75,preserve="single"),size=1.5)+
+  ylab('Avg. Bray Curtis distance to FASW (t=0 dpi)')+
+  scale_fill_manual(values = myPal) +
+  scale_color_manual(values = myPal)+
+  theme_new +
+  theme(title = element_text(size = 12))+
+  theme(legend.title = element_blank(),
+        legend.text = element_text(size=9))
+bcd
+```
+
+##### GLM - beta regression 
+
+```{r}
+result
+```
+```{r}
+#fix ordered vectors
+result <- metadata %>%
+  left_join(mean_dist_to_ref, by = c("sample_id"= "sample1")) %>% 
+  mutate(dpi=forcats::fct_drop(dpi), treatment=fct_drop(treatment)) %>% 
+  mutate(dpi=as.vector(dpi),treatment=as.vector(treatment))
+```
+
+How does distance from a reference change over time?
+```{r}
+library(glmmTMB)
+
+#run a glm using beta regression but acknowlding non independence limitation 
+model_tmb <- glmmTMB(mean_dist_to_fasw_dpi0 ~ treatment * dpi + (1|sample.names),
+                     data   = result,
+                     family = beta_family(link = "logit")) 
+summary(model_tmb)
+```
+
+```{r}
+car::Anova(model_tmb, type = "II")
+```
+```{r}
+# test interaction term
+model_tmb_noint <- glmmTMB(mean_dist_to_fasw_dpi0 ~ treatment + dpi + (1 | sample.names),
+                            data   = result,
+                            family = beta_family(link = "logit"))
+
+anova(model_tmb_noint, model_tmb)  # LRT for interaction
+```
+
+```{r}
+emmeans(model_tmb,  ~ treatment * dpi  , adjust = "BH")
+```
+###### Check model assumptions
+
+```{r}
+library(DHARMa)
+
+# Simulate residuals 
+par(mfrow=c(2,2))
+sim_res <- simulateResiduals(model_tmb, plot = TRUE)
+testDispersion(sim_res) #over disperstion vs under dispersion 
+testZeroInflation(sim_res) # excess 0s?
+testOutliers(sim_res) #outliers? 
+```
+
+##### Betadispersion
+"do some treatment × dpi combinations have more variable communities than others?"
+```{r}
+dist<-dist_get(nmds.mod)
+groups<-interaction(nmds.mod@sam_data$treatment, nmds.mod@sam_data$dpi)
+bd <- betadisper(dist, groups)
+anova(bd)          # overall test
+permutest(bd)      # permutation-based, more robust
+```
+
+```{r}
+#run pairwise comparison 
+tukey_result <- TukeyHSD(bd)
+# Extract the pairwise comparisons table
+tukey_table <- as.data.frame(tukey_result$group)
+# Sort by p-value lowest first
+tukey_table <- tukey_table[order(tukey_table$`p adj`), ]
+tukey_table
+```
+```{r}
+plot(bd)
+boxplot(bd, las = 2)
+```
+
+
+# FAVA analysis 
+From https://maikemorrison.github.io/FAVA/
+Goal of FAVA is to quantify compositional variability in a dataset across treatments using an FST appraoch
+https://maikemorrison.github.io/FAVA/articles/microbiome_tutorial.html
+
+## prep data
+```{r}
+library(FAVA)
+#select data
+ps.exp.ra<-microbiome::transform(ps.exp, "compositional")
+ps.analysis<-ps.exp.ra %>% ps_filter(dpi != "-1")
+
+my_data<-relab_phyloseq(ps.analysis) %>% 
+  dplyr::select(-is.neg,-Index,-LibrarySize,-sample_or_control, -sample.names3,-sample.names2,-DNA_conc_ng_ul) %>%
+  mutate(treatment=as.vector(treatment), dpi=as.numeric(as.vector(dpi))) %>% arrange(dpi)
+
+str(my_data)
+```
+```{r}
+# Confirm that your samples each sum to 1
+# if columns 4 through 10 contain the relevant categories
+# and columns 1, 2, and 3 contain metadata
+rowSums(my_data[,c(5:ncol(my_data))])
+```
+## check matrixs match
+```{r}
+# specify tree
+tree <- phy_tree(ps.analysis)
+
+#get phylogenetic distances
+distance_matrix <- ape::cophenetic.phylo(tree)
+
+#similarity matrix
+similarity_matrix = exp(-distance_matrix)
+
+# alternative similarity matrices:
+# similarity_matrix = 1/(distance_matrix + 1)
+# similarity_matrix = 1 - distance_matrix/max(distance_matrix)
+
+# Get the names of the species in your relative abundance matrix
+species_order <- colnames(my_data[,c(5:ncol(my_data))])
+
+# Confirm that the entries of the similarity matrix
+# correspond to relative abundance matrix
+all(species_order == colnames(similarity_matrix))
+all(species_order == rownames(similarity_matrix))
+
+# If they do not, you can re-order the rows and columns of
+# your similarity matrix to match your data:
+# similarity_matrix_reordered = similarity_matrix[species_order, species_order]
+
+# confirm that all diagonal elements are still 1
+diag(similarity_matrix)
+```
+## run analysis
+### visualize relative abudnances 
+```{r}
+set.seed(1)
+nr<-length(5:ncol(my_data))
+species_palette = viridis::turbo(nr)[sample(1:nr)] %>%
+  `names<-`(colnames(my_data)[-c(1:5)])
+
+# Make a ggplot2 stacked bar plot
+plot_relabund(my_data,
+              group = "treatment",
+              arrange = "vertical",
+              K = nr) +
+# Specify a custom color scheme
+  ggplot2::scale_color_manual(values = species_palette) +
+  ggplot2::scale_fill_manual(values = species_palette)
+```
+### compute unweighted FAVA
+```{r}
+fava.out<-fava(relab_matrix = my_data,
+     group = c("treatment","dpi"),
+     K = nr, normalized = T)
+```
+#### plot FAVA
+higher values of FAVA mean treatment is more variable at that time point vs. lower values of FAVA. 
+
+```{r}
+fa<-ggplot(fava.out, aes(x = dpi, y = FAVA,color=treatment)) + 
+  geom_point(size = 3) + 
+    geom_line()+
+  scale_color_manual(values=myPal)+
+  theme_new
+fa
+```
+FAVA tells us that the ABS samples at the start of the experiment are most variable across individuals, while toward the end of the experiment vibrio has the most variation in the FAVA score. 
+- ABS consistent with past work; ABS induces disorganization of community during initial time points with highest variation on 4 dpi. Then the composition variation of the ABS samples converges as the community becomes more similar. 
+- FASW stays similar across experiment 
+- for most bac inoculation treatments FAVA score increases 4 DPI but then levels off, except vibrio
+- Vibrio FAVA score increases and keeps increasing suggesting Vibrio had the longest impact on the variation of the community in the experiment
+
+#### bootstrap
+change this to include similarity matrix as well 
+
+To determine if these differences in variability levels are statistically significant, we employ bootstrapping, a computational method used to generate a null distribution against which to test statistical hypotheses.
+```{r}
+#bootstrap_out <- bootstrap_fava(relab_matrix = my_data,
+#                               n_replicates = 500,  
+#                               seed = 3,
+#                               group = c("treatment","dpi"),
+#                               K = nr)
+```
+get pvalues
+```{r}
+#str(bootstrap_out, max.level = 1)
+#bootstrap_out$P_values %>% arrange(P_value)
+```
+
+plot results
+```{r}
+#bootstrap_out$bootstrap_distribution_plot
+```
+
+
+
+
+# ANCOM-BC2 Analysis
+
+Runs a differential abundance analysis comparing the abundance of each ASV between the ABS samples and the treatment samples across each timepoint (1, 4, 14 and 21 dpi)
+
+## Set up analysis
+```{r}
+library(ANCOMBC)
+ps.analysis<-ps.exp %>% ps_filter(dpi != "-1")
+treatments_ancom <- c("labrenzia", "ruegeria", "vibrio", "ISOABC")
+timepoints_ancom <- c("1dpi", "4dpi", "14dpi", "21dpi")
+```
+
+## run analysis 
+compares each treatment to ABS conditions at each time point 
+```{r}
+ancom_results <- list()
+
+for (tp in timepoints_ancom) { #loops timepoints
+  for (trt in treatments_ancom) { #loops treatments
+    
+     # subset to ABS + focal treatment
+    ps.sub <- ps.analysis %>%
+      ps_filter(treatment %in% c("ABS", trt)) %>%
+      ps_filter(timepoint == tp) %>%
+      tax_filter(min_prevalence = 0.1)  # remove taxa present in < 10% of samples
+    
+    # skip small groups
+    grp_sizes <- table(sample_data(ps.sub)$treatment)
+    if (any(grp_sizes < 2)) next
+    
+    # run ANCOM-BC2
+    res <- ancombc2(
+      data          = ps.sub,
+      tax_level     = NULL,
+      fix_formula   = "treatment",
+      p_adj_method  = "BH",
+      group         = "treatment",
+      struc_zero    = F, 
+      neg_lb        = TRUE,
+      verbose       = FALSE,
+      pseudo        = TRUE,
+      pseudo_sens   = TRUE
+    )
+    
+    # rename treatment-specific columns to generic names
+    res_df <- res$res %>%
+      dplyr::select(
+        taxon,
+        lfc        = paste0("lfc_treatment", trt),
+        se         = paste0("se_treatment", trt),
+        W          = paste0("W_treatment", trt),
+        p          = paste0("p_treatment", trt),
+        q          = paste0("q_treatment", trt),
+        diff       = paste0("diff_treatment", trt),
+        passed_ss  = paste0("passed_ss_treatment", trt)
+      ) %>%
+      mutate(timepoint  = tp,
+             comparison = paste0(trt, "_vs_ABS"))
+    
+    ancom_results[[paste(tp, trt)]] <- res_df
+  }
+}
+
+ancom_results_df <- bind_rows(ancom_results)
+
+# significant hits
+ancom_sig <- ancom_results_df %>% filter(diff == TRUE)
+ancom_sig %>% arrange(comparison, timepoint, q)
+```
+
+## Visualize 
+```{r}
+# join taxonomy to get genus names instead of ASV IDs
+tax_df <- tax_table(ps.analysis) %>% 
+  as.data.frame() %>% 
+  rownames_to_column("taxon") %>%
+  dplyr::select(taxon, Species)
+
+ancom_sig_2 <- ancom_sig %>%
+  left_join(tax_df, by = "taxon") %>%
+  mutate(
+    sig_label = case_when(
+      q < 0.001 ~ "***",
+      q < 0.01  ~ "**",
+      q < 0.05  ~ "*",
+      TRUE      ~ ""
+    ),
+    direction = ifelse(lfc > 0, "Enriched vs ABS", "Depleted vs ABS")
+  ) %>% 
+   mutate(Species_short = gsub("\\(.*\\)", "", Species),   # drop accession
+         Species_short = gsub("_A$|_B$", "", Species_short),  # drop _A/_B suffixes if unwanted
+         Species_short = trimws(Species_short))
+  
+```
+
+```{r}
+#reorder species, treatments and timepoints
+sig_species <- unique(ancom_sig_2$Species_short)
+priority_species<-c("Roseibium aggregatum","Epibacterium scottomollicae","Vibrio alginolyticus")
+
+other_species  <- sort(setdiff(unique(ancom_sig_2$Species_short), priority_species))
+ancom_sig_2   <- ancom_sig_2 %>%
+  mutate(Species_short = factor(Species_short, levels = rev(c(priority_species, other_species)))) %>% 
+  mutate(timepoint=factor(timepoint, levels=c('1dpi','4dpi','14dpi','21dpi'),ordered=T),
+         comparison=factor(comparison,levels=c("ISOABC_vs_ABS","labrenzia_vs_ABS", "ruegeria_vs_ABS",  "vibrio_vs_ABS"),ordered=T)) %>% 
+  mutate(comparison2=recode(comparison, 'ISOABC_vs_ABS'='ISOABC','labrenzia_vs_ABS'='Labrenzia','ruegeria_vs_ABS'='Ruegeria','vibrio_vs_ABS'='Vibrio'))
+```
+
+
+```{r}
+diff_taxa<-ggplot(ancom_sig_2, aes(x = timepoint, y = Species_short, fill = lfc)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  geom_text(aes(label = sig_label), size = 4, vjust = 0.75) +
+  facet_grid(~ comparison2) +
+  scale_fill_gradient2(
+    low = "#2166AC", mid = "white", high = "#B2182B",
+    midpoint = 0, name = "Log Fold\nChange vs ABS"
+  ) +
+  scale_x_discrete(limits = c("1dpi", "4dpi", "14dpi", "21dpi")) +
+  theme_bw() +
+  theme(
+    axis.text.y      = element_text(size = 8, face = "italic"),
+    axis.text.x      = element_text(angle = 45, hjust = 1),
+    strip.text       = element_text(face = "bold"),
+    strip.background = element_blank(),
+    panel.grid       = element_blank()
+  ) +
+  labs(x = "Timepoint", y = "Species",
+       title = "Differentially Abundant Taxa vs ABS")
+diff_taxa
+```
+- This is plotting the deferentially abundant taxa as logfold 2 change between treatment and ABS where red is higher in treatment and blue is higher in ABS samples for each timepoint
+- ISOABC vs. ABS: both labrenzia (Roseibium) and ruegeria (Epibacterium) came up as being diff abund at start of experiment, do not see diff abundance of vibrio --> labrenzia and ruegeria did a good job at outcompeting vibrio for space 
+- Labrenzia -> diff abundant during 1, 4 and 14 dpi
+- Ruegeria -> diff abundnace at 1 dpi, nr of taxa that diff abudnnace in tratment at end of experiment, including: 
+  - Alcanivoraz 
+  - Bdellovibrionaceae family
+  - Hoeflea 
+  - Mamelilla alba 
+  - Marcaulis maris 
+- Vibrio -> diff abundance at 1 and 4 dpi
+  - at end of expeirment, altermonas portus diff abundance 
+- In all inoculation vs. abs samples, acorss most timepoints see sig depletion of Shimia species, including shimia aestuarii, s. haliotis
+
+  
+
+```{r}
+#get sig species names
+sig_species_full <- unique(ancom_sig_2$Species)
+priority_species<-c("Roseibium aggregatum_A(RS_GCF_001999245_1)","Epibacterium scottomollicae(RS_GCF_003003215_1)","Vibrio alginolyticus(RS_GCF_000354175_2)")
+
+#extract rel abundance for sig. species
+relabund_heat<- psmelt(ps_get(ps.relAbund)) %>%
+  filter(Species %in% sig_species_full) %>%
+  filter(timepoint %in% c("1dpi", "4dpi", "14dpi", "21dpi")) %>%
+  filter(treatment %in% c('ABS' ,'ISOABC', 'labrenzia' ,'ruegeria' ,'vibrio')) %>% 
+  group_by(Species, treatment, timepoint) %>%
+  summarise(mean_rel_abund = mean(Abundance, na.rm = TRUE), .groups = "drop")
+
+# join significance labels from ancom_sig
+sig_overlay <- ancom_sig_2 %>%
+  mutate(treatment = str_remove(comparison, "_vs_ABS")) %>% 
+  dplyr::select(Species, timepoint, treatment, sig_label)
+
+#join sig levels and rel abundance 
+relabund_heat.sig_overlay <- relabund_heat %>%
+  left_join(sig_overlay, by = c("Species", "timepoint", "treatment")) %>%
+  mutate(sig_label = replace_na(sig_label, ""))
+
+# z-score each genus across all treatment/timepoint combinations
+df.heat <- relabund_heat.sig_overlay %>%
+  group_by(Species) %>%
+  mutate(zscore = scale(mean_rel_abund)[, 1]) %>%
+  ungroup()
+
+# fix ordering of species, treatments, and get short species names 
+df.heat<-df.heat %>%  #get short names
+         mutate(Species_short = gsub("\\(.*\\)", "", Species),   # drop accession
+         Species_short = gsub("_A$|_B$", "", Species_short),  # drop _A/_B suffixes if unwanted
+         Species_short = trimws(Species_short))
+
+# reorder species: priority species first, then remaining alphabetically
+priority.sp<-c("Epibacterium scottomollicae","Roseibium aggregatum","Vibrio alginolyticus")
+other.sp<-sort(setdiff(unique(df.heat$Species_short), priority.sp))
+
+# reorder things
+df.heat <-df.heat %>% 
+          mutate(Species_short=factor(Species_short,levels=rev(c(priority.sp,other.sp)))) %>% 
+          mutate(timepoint=factor(timepoint, levels=c('1dpi','4dpi','14dpi','21dpi')),
+                 treatment=factor(treatment,levels=c('ABS' ,'ISOABC', 'labrenzia' ,'ruegeria' ,'vibrio')))
+
+ggplot(df.heat, aes(x = timepoint, y = Species_short, fill = mean_rel_abund)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  geom_text(aes(label = sig_label), size = 3.5, vjust = 0.75, color = "black") +
+  facet_wrap(~ treatment, nrow = 1) +
+  scale_fill_gradientn(
+    colours  = c("white", "#FED976", "#FD8D3C", "#E31A1C", "#800026"),
+    name     = "Mean\nRelative\nAbundance",
+    labels   = scales::percent_format(accuracy = 0.1),
+    na.value = "grey90"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x      = element_text(angle = 45, hjust = 1),
+    axis.text.y      = element_text(size = 8, face = "italic"),
+    strip.text       = element_text(face = "bold"),
+    strip.background = element_blank(),
+    panel.grid       = element_blank(),
+    legend.title     = element_text(size = 9)
+  ) +
+  labs(x = "Timepoint", y = "Species",
+       title    = "Relative Abundance of Differentially Abundant Taxa",
+       subtitle = "Asterisks indicate significance Treatment vs ABS (ANCOM-BC2)")
+```
+In the entire experiment, there were 30 bacterial species / ASVs that were sig different between treatment and time point comparisons. 
+
+
+
+# Barplot
+```{r}
+# set taxon order: inoculants first, then remaining by abundance
+all_taxa      <- tax_table(ps.relAbund)[, "Species"] %>%
+  as.data.frame() %>% pull(Species) %>% unique()
+other_taxa    <- setdiff(all_taxa, priority_species)
+tax_order     <- c(priority_species, other_taxa)
+
+# clean facet labels
+trt_labels <- c(
+  "ABS"       = "ABS",
+  "labrenzia" = "Labrenzia",
+  "ruegeria"  = "Ruegeria",
+  "vibrio"    = "Vibrio",
+  "ISOABC"    = "All Three"
+)
+tp_labels <- c(
+  "post_priming" = "Pre-ABS",
+  "post_ABS"     = "Post-ABS",
+  "1dpi"         = "1 dpi",
+  "4dpi"         = "4 dpi",
+  "14dpi"        = "14 dpi",
+  "21dpi"        = "21 dpi"
+)
+```
+
+```{r}
+library(ggh4x)
+
+bar<-ps.relAbund %>%
+  ps_filter(timepoint %in% c("1dpi", "4dpi", "14dpi", "21dpi")) %>%
+  ps_mutate(
+    dpi      = as.factor(dpi),
+    timepoint = factor(timepoint, levels = c("1dpi", "4dpi", "14dpi", "21dpi"))
+  ) %>%
+  tax_sort(by = sum, at = "Species") %>%
+  comp_barplot(tax_level = 'Species', n_taxa = 30,
+               merge_other = FALSE,
+               other_name  = "Other",
+               x           = 'sample.names',
+               tax_order   = tax_order) +
+  facet_nested(.~treatment + timepoint,
+               scales   = 'free', space = "free",
+               labeller = labeller(treatment = trt_labels,
+                                   timepoint = tp_labels)) +
+  theme(
+    #axis.text.y      = element_blank(),
+    #axis.ticks.y     = element_blank(),
+    strip.text       = element_text(size = 9, face = "bold"),
+    #strip.background = element_blank(),
+    panel.spacing    = unit(0.2, "lines")
+  ) +
+  ylab('Relative Abundance') + xlab('')
+
+bar
+```
+
+
+# Figures
+```{r}
+library(patchwork)
+```
+
+## Main Figure
+
+```{r}
+bcd.2<-bcd + theme(legend.position="none") + theme(axis.title = element_text(size=12)) + theme(legend.title  = element_blank())
+
+n1.2<-n1+ theme(axis.title = element_text(size=12))+ theme(legend.title = element_blank()) 
+
+(n1.2 + bcd.2) / diff_taxa +  plot_layout(nrow=2, widths=c(1,1)) + plot_annotation(tag_levels='A')
+
+ggsave(file.path(path.out,'FigX_16S.svg'),width=14, height=8,units = "in" )
+```
+```{r}
+bcd.2
+```
+
+
+```{r}
+bcd.2<-bcd + theme(legend.position="none") + theme(axis.title = element_text(size=12)) + theme(legend.title  = element_blank())
+bar.2<- bar + theme(legend.position="bottom") +  theme(axis.title = element_text(size=12))+ theme(legend.title = element_blank())
+n1.2<-n1+ theme(axis.title = element_text(size=12))+ theme(legend.title = element_blank()) 
+bar.2 + n1.2 + bcd.2 + plot_layout(nrow=2, widths=c(1.5,1,0.5)) + plot_annotation(tag_levels='A')
+
+ggsave(file.path(path.out,'FigX_16s.svg'),width=14, height=8,units = "in" )
+```
+```{r}
+n1.2
+ggsave(file.path(path.out,'ordination.pdf'),units = 'in',width = 8,height=7)
+```
+
+```{r}
+bar
+ggsave(file.path(path.out,'barplot.pdf'),units = 'in',width = 16,height=7)
+```
+
+
+## Supplemental figures
+
+### nmds faceted plot
+```{r}
+n_s1
+ggsave(file.path(path.out,'FigSX_nmds_facets.pdf'),units = 'in',width = 8,height=4)
+```
+
+### FAVA analysis 
+```{r}
+fa
+ggsave(file.path(path.out,'FigSX_fava.pdf'),units = 'in',width = 5,height=3.5)
+```
+
+### Diff Abund taxa
+```{r}
+diff_taxa + ggtitle('ANCOM Sig Taxa: Trt vs. ABS')
+ggsave(file.path(path.out,'FigSX_diffABund.pdf'),units = 'in',width = 10,height=5)
+```

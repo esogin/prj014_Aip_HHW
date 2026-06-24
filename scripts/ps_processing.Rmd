@@ -1,0 +1,231 @@
+---
+title: "ps-processing"
+author: "Maggie Sogin"
+date: "2026-06-02"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    toc_float: true
+---
+
+# Set up working space
+read in packages
+```{r}
+library(tidyverse)
+library(phyloseq);packageVersion('phyloseq')
+library(ggplot2)
+library(decontam);packageVersion('decontam')
+library(microbiome);packageVersion('microbiome')
+library(microViz);packageVersion('microViz')
+```
+set up plotting conditions
+```{r}
+#set up plotting conditions
+trt<-c("FASW","ABS","labrenzia","ruegeria","vibrio","ISOABC")
+myPal<-c('grey60','black','#A6CEE3','#1F78B4','#B2DF8A','violet')
+names(myPal) = trt
+
+shpPal<-c(15,16,17,18,4,1)
+dpis<-c("21","14","4","1","0","-1")
+names(shpPal) = dpis
+
+dpiPal<-c('black','gray30','seashell','seashell2','seashell3','seashell4')
+names(dpiPal) <- c('-1','0','1','4','14','21')
+
+theme_new<- theme_bw() + theme(panel.grid.major = element_line(color='gray90'), panel.grid.minor = element_line(color='gray90'), text= element_text(size = 15), axis.text.x = element_text(angle = 65,hjust = 1), legend.text = element_text(size = 20), axis.title = element_text(size = 15), title = element_text(size = 20))
+```
+
+# Read in and manipulate data
+
+Notes: ps object was generated using dada2.mock.r and dada2.samples.r pipeline with the
+following notes: - error models was learned on mock samples - error
+model was applied to all experimental samples to learn error - sequence
+stats are reported in stats.csv
+
+chimera detection notes: When including the mock community samples which are rich in chimeras, we detected 1043 chimeric sequences out of 2081 ASVs. When we run the pipeline without the mock communities, only 53 ASVs out of 988 AVS are determine to be chimeras
+
+## Read in data
+
+```{r}
+ps<-readRDS('../data/16S/ps.withTree.rds')
+df.meta<-read.csv('../data/16S/metadata.csv')
+ps
+head(df.meta); dim(df.meta)
+```
+## Sample data frame
+
+```{r}
+#sample names
+tmp<-data.frame(sample_data(ps))
+tmp$sample.names<-str_replace(tmp$sample.names,'_pacbio.fastq.gz','')
+tmp$names.rows<-rownames(tmp)
+
+#join two datasets
+tmp.full<-left_join(tmp,df.meta, by='sample.names')
+head(tmp.full); tail(tmp.full)
+```
+
+```{r}
+#rename rows
+rownames(tmp.full)<-tmp.full$names.rows
+
+#rename as metadata.df and remove names.rows column
+metadata.df<-tmp.full %>% dplyr::select(sample.names,treatment,timepoint,DNA_conc_ng_ul)
+
+head(metadata.df); tail(metadata.df); dim(metadata.df)
+
+#set factor levels for treatment and dpi
+metadata.df<-metadata.df %>% 
+  mutate(dpi=case_when(timepoint=='post_priming' ~ -1,
+                      timepoint=='post_ABS' ~0,
+                      timepoint=='1dpi' ~ 1,
+                      timepoint=='4dpi' ~ 4,
+                      timepoint=='14dpi' ~ 14,
+                      timepoint=='21dpi' ~ 21 )) %>% 
+  mutate(dpi=factor(dpi,levels=c(21,14,4,1,0,-1, NA),ordered = T)) %>% 
+  arrange(dpi) %>% 
+  mutate(sample.names2=factor(sample.names, levels=rev(unique(sample.names)))) %>% 
+  mutate(sample.names3=paste(sample.names2, dpi)) %>% 
+  mutate(treatment=factor(x=treatment, levels=c('FASW','ABS','ISOABC','labrenzia','ruegeria','vibrio','ext_blk', 'mock_extracted','mock_dna')))
+
+#add to phyloseq object
+sample_data(ps)<-metadata.df
+ps
+```
+# Preprocess data
+## Remove blank wells
+```{r}
+ps<-ps %>% subset_samples(!is.na(treatment))
+```
+
+## Remove chloroplast and mitocondria reads
+```{r}
+ps_clean <- ps %>%
+  subset_taxa(
+    Order != "Chloroplast" &
+    Family != "Mitochondria" &
+    Class != "Chloroplast" # Sometimes Chloroplast is in Class
+  )
+ps
+ps_clean # went from 1038 ASVs to 923 AVS
+```
+## Run decontam pipeline
+use frequency method with threshold set at 0.1
+
+```{r}
+df <- as.data.frame(sample_data(ps_clean)) # Put sample_data into a ggplot-friendly data.frame
+df$sample_or_control<-'sample'
+df[df$treatment=='ext_blk','sample_or_control']<-'control'
+df$LibrarySize <- sample_sums(ps_clean)
+df <- df[order(df$LibrarySize),]
+df$Index <- seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, color=sample_or_control)) + geom_point()
+```
+
+Identify contaminants using Prevalence method, with threshold set at 0.5
+```{r}
+sample_data(ps_clean)<-df
+sample_data(ps_clean)$is.neg <- sample_data(ps_clean)$sample_or_control == "control"
+contamdf<- isContaminant(ps_clean, 
+                         method="frequency", 
+                         neg="is.neg", 
+                         threshold=0.1,
+                         conc="DNA_conc_ng_ul",
+                         )
+table(contamdf$contaminant)
+(ct<-rownames(contamdf)[which(contamdf$contaminant)])
+```
+
+Need to investigate taxa deemed contaminants
+```{r}
+tax_table(subset_taxa(ps_clean,rownames(tax_table(ps_clean)) %in% ct))
+```
+remove contaminants 
+```{r}
+ps_clean.2<-subset_taxa(ps_clean,!rownames(tax_table(ps_clean)) %in% ct)
+```
+
+
+## Prune samples
+Investigate the number of reads per sample across treatments
+
+```{r}
+readsums.df <- data.frame(nreads = sort(sample_sums(ps_clean.2), TRUE), sorted = 1:nsamples(ps_clean.2), type = "sample")
+readsums.df <- readsums.df %>% mutate(sample.names=str_replace(rownames(readsums.df),'_pacbio.fastq.gz',''))
+readsums.df <- full_join(readsums.df,df.meta, by='sample.names')
+
+#plot across treatments
+ggplot(readsums.df, aes(x=treatment, y=nreads)) + geom_point() + ylim(0,10000) #look at samples with fewer then 10K reads
+```
+only plotting low read number samples 
+
+remove samples that have less then 2500 reads per sample
+```{r}
+ps_clean.2.5Kreads<-prune_samples(sample_sums(ps_clean.2) >=2500, ps_clean.2)
+ps_clean.2.5Kreads #goes from 128 to 105 samples
+
+#get treatment size
+samps.sizes<-data.frame(sample_data(ps_clean.2.5Kreads)) %>% group_by(treatment, timepoint) %>% summarise(count=length(sample.names))
+samps.sizes %>% arrange(count)
+```
+```{r}
+summarize_phyloseq(ps_clean.2.5Kreads)
+```
+
+## Fix taxa names and validate ps object
+
+```{r}
+ps.all<-ps_clean.2.5Kreads  %>% tax_fix() %>% phyloseq_validate(remove_undetected = T)
+ps.all
+```
+
+## Subset out experimental samples
+```{r}
+ps.exp<-prune_samples(!is.na(sample_data(ps_clean.2.5Kreads)$timepoint),ps_clean.2.5Kreads)
+ps.exp<-prune_taxa(taxa_sums(ps.exp)>0, ps.exp) #remove ASVs with 0 counts
+ps.exp 
+samps.sizes<-data.frame(sample_data(ps.exp)) %>% group_by(treatment, timepoint) %>% summarise(count=length(sample.names))
+samps.sizes 
+```
+
+
+## Save phyloseq object
+```{r}
+saveRDS(ps.exp, file='../data/16S/ps.exp.samples.rds')
+```
+
+# Mock data analysis
+
+## subset out mock samples
+```{r}
+ps.mock<-prune_samples(sample_data(ps_clean.2.5Kreads)$treatment %in% c('mock_extracted','mock_dna'),ps_clean.2.5Kreads)
+ps.mock<-prune_taxa(taxa_sums(ps.mock)>0, ps.mock) #remove ASVs with 0 counts
+ps.mock 
+samps.sizes<-data.frame(sample_data(ps.mock)) %>% group_by(treatment, timepoint) %>% summarise(count=length(sample.names))
+samps.sizes 
+```
+## barplot 
+
+```{r}
+ps.mock %>% 
+  tax_fix() %>% 
+  tax_filter(min_prevalence = 0.5,min_total_abundance = 0.01, tax_level = "Species")  %>% 
+  comp_barplot(tax_level = 'Species', n_taxa = 15,facet_by = "treatment") +
+  theme(axis.text.x = element_blank())
+```
+Expected taxa for mock: 
+Bacillus subtilis  ✅
+Listeria monocytogenes  ✅
+staphylococcus aureus ✔️
+Lactobacillus fermentum (aka Limosilactobacillus) ✅
+Salmonella enterica  ✅
+E. coli ✅
+Enterococcus faecalis ✅
+Pseudomonas aeruginosa ✅
+
+There are also some other things but generally this looks good
+
+
+
