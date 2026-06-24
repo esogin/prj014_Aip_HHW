@@ -147,7 +147,6 @@ remove contaminants
 ps_clean.2<-subset_taxa(ps_clean,!rownames(tax_table(ps_clean)) %in% ct)
 ```
 
-
 ## Prune samples
 Investigate the number of reads per sample across treatments
 

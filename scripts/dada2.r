@@ -49,11 +49,32 @@ track1 <- filterAndTrim(nops, filts1, minQ=3, minLen=1000, maxLen=1600, maxN=0, 
 track1
 
 #------------------------------------------------------------------------------------------
-# Step 2: Denoise samples using error model from mock community
+# Step 2: dereplicate sequences and learn errors
 #------------------------------------------------------------------------------------------
-print("Step 2: Denoise samples")
+#Step 2: dereplicate sequences
+print("Step 2: dereplicate sequences")
+drp <- derepFastq(filts1, verbose=TRUE)# check duplication rate, if over 0.90 
 
-err<-readRDS(file.path(path.rds, "mock_err.rds")) #read in error model
+#Step 3: learn errors 
+print("Step 3: learn errors")
+
+binnedQs <- c(3, 10, 17, 22, 27, 35, 40) #based on Revio standard https://github.com/benjjneb/dada2/issues/1307#issuecomment-2706010999
+binnedQualErrfun <- makeBinnedQualErrfun(binnedQs)
+
+# Learn the error model
+err<-learnErrors(drp, errorEstimationFunction=binnedQualErrfun, nbases=1e10, multithread=32, randomize = T, verbose=TRUE)
+saveRDS(err, file.path(path.rds, "err_all_samples.rds"))
+#err<-readRDS(file.path(path.rds, "err_all_samples.rds"))
+
+plotErrors(err)
+ggsave(file.path(path.out, "err_profiles.png"))
+
+
+#------------------------------------------------------------------------------------------
+# Step 3: Denoise samples using error model from mock community
+#------------------------------------------------------------------------------------------
+print("Step 3: Denoise samples")
+
 dd <- dada(filts1, err=err, BAND_SIZE=32, multithread=TRUE) # apply error model
 saveRDS(dd, file.path(path.rds, "all_dd.rds"))
 #dd<-readRDS(file.path(path.rds, "all_dd.rds"))
@@ -64,9 +85,9 @@ stats
 write.csv(stats, file = file.path(path.rds, "stats.csv"), row.names = FALSE)
 
 #------------------------------------------------------------------------------------------
-# Step 3: make sequence table & assign taxonomy
+# Step 4: make sequence table & assign taxonomy
 #------------------------------------------------------------------------------------------
-print("Step 3: make sequence table & assign taxonomy")
+print("Step 4: make sequence table & assign taxonomy")
 
 st <- makeSequenceTable(dd); dim(st)
 saveRDS(st, file.path(path.rds, "all_st.rds")) #save sequence table
@@ -90,12 +111,43 @@ print("Step 5 check for chimerals and remove")
 # check for chimeras 
 bim <- isBimeraDenovo(st, minFoldParentOverAbundance=3.5, multithread=TRUE)
 table(bim)
-sum(st[,bim])/sum(st) #gives precent chimerias
+sum(st[,bim])/sum(st) #gives precent chimerias and accounts for abundnace of the chimeras, so percent of reads that are chimeras
 
 # Remove chimeras
 st.nochim <- removeBimeraDenovo(st, method="consensus", multithread=TRUE, verbose=TRUE)
 dim(st.nochim)
 saveRDS(st.nochim, file.path(path.rds, "all_st.nochim.rds")) #save object
+
+#------------------------------------------------------------------------------------------
+# Step 4b: Per-sample ASV and chimera summary table
+#------------------------------------------------------------------------------------------
+
+# Total ASVs per sample (before chimera removal)
+asv_per_sample <- rowSums(st > 0)
+
+# Chimeric ASVs per sample
+chim_per_sample <- rowSums(st[, bim, drop=FALSE] > 0)
+
+# Non-chimeric ASVs per sample (after removal)
+nonchim_per_sample <- rowSums(st.nochim > 0)
+
+# Build summary table
+asv_summary <- data.frame(
+  Sample            = rownames(st),
+  Total_ASVs        = asv_per_sample,
+  Chimeric_ASVs     = chim_per_sample,
+  NonChimeric_ASVs  = nonchim_per_sample,
+  Pct_Chimeric      = round(chim_per_sample / asv_per_sample * 100, 2)
+)
+
+print(asv_summary)
+write.csv(asv_summary, file = file.path(path.rds, "asv_chimera_summary.csv"), row.names = FALSE)
+
+# track dataset
+getN <- function(x) sum(getUniques(x))
+stats2 <-cbind(ccs=prim1[,1], primers=prim1[,2], filtered=track1[,2], denoised=sapply(dd, function(x) sum(x$denoised)),nonchimera=rowSums(st.nochim))
+head(stats2)
+write.csv(stats2, file = file.path(path.rds, "stats2.csv"), row.names = FALSE)
 
 #------------------------------------------------------------------------------------------
 # Step 5: Phyloseq object
