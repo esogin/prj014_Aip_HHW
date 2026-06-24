@@ -79,6 +79,9 @@ treatment_levels <- c(
   "ISOB" = "Ruegeria", 
   "ISOC" = "Vibrio", 
   "ISOABC" = "multi")
+
+path.out<-"../../output/transcriptomics"
+path.in<-"../../data/transcriptomics"
 ```
 
 ---
@@ -87,25 +90,25 @@ treatment_levels <- c(
 
 ```{r load-all-data}
 # featureCounts gene count matrix (6 annotation cols + 48 samples)
-counts_raw <- read.delim("../data/counts.tsv", comment.char = "#", check.names = FALSE)
+counts_raw <- read.delim(file.path(path.in,"counts.tsv"), comment.char = "#", check.names = FALSE)
 
 # featureCounts assignment summary
-counts_summary <- read.delim("../data/counts.tsv.summary", check.names = FALSE)
+counts_summary <- read.delim(file.path(path.in,"counts.tsv.summary"), check.names = FALSE)
 
 # HISAT2 alignment rates
-hisat2_sum <- read.delim("../data/hisat2_alignment_summary.tsv")
+hisat2_sum <- read.delim(file.path(path.in,"hisat2_alignment_summary.tsv"))
 
 # Per-reference organism read counts (aip, sym, lab, rue, vib)
-organism_counts <- read.delim("../data/per_reference_counts.tsv")
+organism_counts <- read.delim(file.path(path.in,"per_reference_counts.tsv"))
 
 # SortMeRNA rRNA removal summary
-sortme_sum <- read.delim("../data/sortmerna_summary.tsv")
+sortme_sum <- read.delim(file.path(path.in,"sortmerna_summary.tsv"))
 
 # Fastp trimming summary
-fastp_sum <- read.delim("../data/fastp_summary_per_sample.tsv", check.names = FALSE)
+fastp_sum <- read.delim(file.path(path.in,"fastp_summary_per_sample.tsv"), check.names = FALSE)
 
 # Aiptasia gene annotations (SwissProt/TrEMBL BLAST, GO, KEGG)
-aip_annotate <- read.delim("../data/Aiptasia_annotation_file.csv")
+aip_annotate <- read.delim(file.path(path.in,"Aiptasia_annotation_file.csv"))
 ```
 
 ---
@@ -139,7 +142,6 @@ stopifnot(all(table(colData$treatment, colData$timepoint) == 4))
 
 # Make metadata by turning rownames into a regular column
 metadata <- colData %>% rownames_to_column("sample")
-
 ```
 
 ---
@@ -157,7 +159,7 @@ plot_QC_fastp <- fastp_sum %>%
   filter(!is.na(treatment)) %>%
   arrange(treatment, timepoint) %>%
   mutate(sample = fct_inorder(sample)) %>%
-  select(sample, treatment, timepoint, reads_before, reads_after) %>%
+  dplyr::select(sample, treatment, timepoint, reads_before, reads_after) %>%
   pivot_longer(cols = c(reads_before, reads_after),
                names_to = "stage", values_to = "reads") %>%
   mutate(stage = factor(stage, levels = c("reads_before", "reads_after"),
@@ -243,8 +245,8 @@ plot_figS1 <- ggplot(figS1_data, aes(x = treatment, y = pct_mapped, color = orga
        y = "% of reads mapped to genome", x = NULL)
 plot_figS1
 
-ggsave("../results/FigS1_pct_mapped_by_genome.pdf", plot_figS1, width = 12, height = 6)
-ggsave("../results/FigS1_pct_mapped_by_genome.png", plot_figS1, width = 12, height = 6, dpi = 300)
+ggsave(file.path(path.out,"FigS1_pct_mapped_by_genome.pdf"), plot_figS1, width = 12, height = 6)
+ggsave(file.path(path.out,"FigS1_pct_mapped_by_genome.png"), plot_figS1, width = 12, height = 6, dpi = 300)
 ```
 
 ## 4.5 featureCounts — Read Assignment Summary
@@ -296,8 +298,8 @@ qc_plots <- list(
   "plot_QC_library_size"  = plot_QC_library_size)
 
 for (name in names(qc_plots)) {
-  ggsave(paste0("../results/", name, ".pdf"), qc_plots[[name]], width = 10, height = 6)
-  ggsave(paste0("../results/", name, ".png"), qc_plots[[name]], width = 10, height = 6, dpi = 300)
+  ggsave(paste0(path.out, name, ".pdf"), qc_plots[[name]], width = 10, height = 6)
+  ggsave(paste0(path.out, name, ".png"), qc_plots[[name]], width = 10, height = 6, dpi = 300)
 }
 ```
 
@@ -309,10 +311,11 @@ Transform the raw featureCounts output into a clean integer count matrix that DE
 
 ```{r clean-counts}
 # Save gene lengths for TPM calculation later
-gene_lengths <- counts_raw %>% select(Geneid, Length) %>% column_to_rownames("Geneid")
+gene_lengths <- counts_raw %>% 
+                dplyr::select(Geneid, Length) %>% column_to_rownames("Geneid")
 
 counts_matrix <- counts_raw %>%
-  select(-Chr, -Start, -End, -Strand, -Length) %>%
+  dplyr::select(-Chr, -Start, -End, -Strand, -Length) %>%
   column_to_rownames("Geneid") %>%
   as.matrix()
 counts_matrix <- round(counts_matrix)
@@ -320,7 +323,7 @@ counts_matrix <- round(counts_matrix)
 all(colnames(counts_matrix) == rownames(colData))
 
 dim(counts_matrix)
-
+head(counts_matrix)
 ```
 
 ## 5.1 Compute TPM Matrix
