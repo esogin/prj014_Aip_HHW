@@ -42,8 +42,8 @@ theme_new<- theme_bw() + theme(panel.grid.major = element_line(color='gray90'), 
 
 set paths
 ```{r}
-path.in<-"../data/16S"
-path.out<-"../output/16S"
+path.in<-"../../data/16S"
+path.out<-"../../output/16S"
 ```
 
 

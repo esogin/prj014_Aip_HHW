@@ -1,0 +1,1480 @@
+---
+title: "prj014: qPCR Analysis"
+author: "Hailey Hatch"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+---
+
+# Introduction
+
+This notebook analyzes qPCR data from an *Aiptasia* bacterial inoculation experiment. The Ef1a primer set was obtained from Hartman et al, 2022. The bacterial target primers were designed by Vivian and Hailey. Copy numbers were calculated by QuantStudio from standard curves run on each plate (2e8 - 2e1 copies, n=3). All bacterial target genes are normalized to the Ef1a housekeeping gene.
+
+**Treatments:**
+
+- **control/FASW** — no antibiotics, no inoculation (natural microbiome)
+- **ABS** — antibiotics only (microbiome-depleted baseline)
+- **ISOA/Labrenzia** — antibiotics + *Labrenzia aggregata* inoculation
+- **ISOB/Ruegeria** — antibiotics + *Ruegeria mobilis* inoculation
+- **ISOC/Vibrio** — antibiotics + *Vibrio alginolyticus* inoculation
+- **ISOABC/multi** — antibiotics + all three bacteria combined
+
+**Timepoints:** 1, 2, 4, 7, 14, and 21 dpi (days post-inoculation)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6,
+  fig.align = "center"
+)
+```
+
+---
+
+# 1. Setup
+
+## 1.1 Load Libraries
+
+```{r load-libraries}
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(purrr)
+library(stringr)
+library(ggplot2)
+library(rstatix)
+library(ggpubr)
+library(dunn.test)
+library(scales)
+```
+
+## 1.2 Define Constants
+
+Setting up values reused across the entire analysis:
+**`palette`** — Named color vector mapping each treatment label to a plot color
+**`treatment_levels`** — Maps the raw treatment codes in the metadata (e.g., "control", "ISOA") to display-friendly labels ("FASW", "Labrenzia"). Also defines the factor ordering for plots.
+**`day_levels`** — Factor levels for sampling timepoints. 
+**`post_inoc_days`** - Subset used for most analyses (excludes the pre-inoculation timepoints "post-priming" and "post-ABS").
+**`outlier_ct_cutoff` (1.5 cycles)** — Tech reps whose Ct deviates >1.5 cycles from the median are flagged as outliers in the LOD/LOQ calculation.
+**`loq_cv_threshold` (0.35)** — The 35% Cq CV cutoff that defines the Limit of Quantification.
+**`results_dir`** — Output folder for saved plots and CSV files.
+
+```{r define-constants}
+palette <- c(
+  "FASW"      = 'grey60',
+  "ABS"       = 'black',
+  "Labrenzia" = '#A6CEE3',
+  "Ruegeria"  = '#1F78B4',
+  "Vibrio"    = '#B2DF8A',
+  "multi"     = 'violet')
+
+treatment_levels <- c(
+  "control" = "FASW",
+  "ABS"     = "ABS",
+  "ISOA"    = "Labrenzia",
+  "ISOB"    = "Ruegeria",
+  "ISOC"    = "Vibrio",
+  "ISOABC"  = "multi")
+
+day_levels <- c("post-priming", "post-ABS", "1dpi", "2dpi", "4dpi", "7dpi", "14dpi", "21dpi")
+post_inoc_days <- c("1dpi", "2dpi", "4dpi", "7dpi", "14dpi", "21dpi")
+
+# LOD/LOQ parameters (matching qpcr_QC_template.Rmd)
+outlier_ct_cutoff <- 1.5   # cycles from median to flag outlier tech reps
+loq_cv_threshold  <- 0.35  # 35% Cq CV = LOQ threshold
+
+results_dir <- "../results/"
+if (!dir.exists(results_dir)) dir.create(results_dir, recursive = TRUE)
+```
+
+## 1.3 Gene Target Configuration
+
+Each target gene needs a `files` vector and an `organism` label for plot titles. Ef1a is the housekeeping gene and is configured separately.
+
+`files` — all `.xlsx` plate export files found in that gene's subfolder under `../data/`
+`organism` — the bacterial species this gene targets (used in plot titles)
+
+The three target genes are:
+**dddL** — targets *Labrenzia* (DMSP lyase gene)
+**ISO163** — targets *Ruegeria*
+**ISO056** — targets *Vibrio*
+
+**ef1a** (the *Aiptasia* housekeeping gene) is listed separately since it's the normalizer, not a target. The chunk prints a summary of how many plates were found per gene as a sanity check.
+
+```{r gene-config}
+data_dir <- "../data/"
+
+# ── Housekeeping gene ──
+ef1a_files <- list.files(paste0(data_dir, "ef1a"), pattern = "\\.xlsx?$",
+                         full.names = TRUE)
+
+# ── Target genes ──
+target_genes <- list(
+  dddL = list(
+    files = list.files(paste0(data_dir, "dddL"), pattern = "\\.xlsx?$",
+                       full.names = TRUE),
+    organism = "Labrenzia"),
+  ISO163 = list(
+    files = list.files(paste0(data_dir, "ISO163"), pattern = "\\.xlsx?$",
+                       full.names = TRUE),
+    organism = "Ruegeria"),
+  ISO056 = list(
+    files = list.files(paste0(data_dir, "ISO056"), pattern = "\\.xlsx?$",
+                       full.names = TRUE),
+    organism = "Vibrio")
+)
+
+target_names <- names(target_genes)
+cat("Housekeeping gene: ef1a (", length(ef1a_files), " plates)\n")
+for (g in target_names) cat("  ", g, ":", length(target_genes[[g]]$files), "plates\n")
+```
+
+## 1.4 Import Functions
+
+Defines three helper functions for reading QuantStudio exports:
+
+**`extract_plate_num(filepath)`** - Reads the filepath name to extract the plate number for assignment in downstream data.
+
+**`read_qpcr(files, gene)`** — Reads the "Results" sheet from each QuantStudio `.xlsx` plate export and row-binds them. The first 41 rows of the Results sheet are QuantStudio header metadata, so `skip = 41` lands on the actual data header row. `clean_names()` converts QuantStudio's mixed-case column headers to snake_case. All columns are first read as character to avoid type conflicts when binding plates that may have different column types, then numeric columns are explicitly converted back. `suppressWarnings` handles "Undetermined" or empty cells that coerce to NA. Each row is tagged with a `plate` index and the `gene` name.
+
+**`read_melt(files, gene)`** — Reads the "Melt Curve Result" sheet from each plate, then joins back to the "Results" sheet to get sample metadata (`task`, `sample_name`) for each well. This is needed because the melt curve sheet only has well IDs, not sample info.
+
+```{r import-functions}
+extract_plate_num <- function(filepath) {
+  as.integer(str_extract(basename(filepath), "(?<=plate)\\d+"))
+}
+
+read_qpcr <- function(files, gene) {
+  map_dfr(seq_along(files), function(i) {
+    read_excel(files[i], sheet = "Results", skip = 41) %>%
+      clean_names() %>%
+      mutate(across(everything(), as.character)) %>%
+      mutate(
+        ct = suppressWarnings(as.numeric(ct)),
+        quantity = suppressWarnings(as.numeric(quantity)),
+        ct_mean = suppressWarnings(as.numeric(ct_mean)),
+        ct_sd = suppressWarnings(as.numeric(ct_sd)),
+        quantity_mean = suppressWarnings(as.numeric(quantity_mean)),
+        quantity_sd = suppressWarnings(as.numeric(quantity_sd)),
+        y_intercept = suppressWarnings(as.numeric(y_intercept)),
+        r_superscript_2 = suppressWarnings(as.numeric(r_superscript_2)),
+        slope = suppressWarnings(as.numeric(slope)),
+        efficiency = suppressWarnings(as.numeric(efficiency)),
+        cq_conf = suppressWarnings(as.numeric(cq_conf)),
+        plate = extract_plate_num(files[i]),
+        gene = gene)
+  })
+}
+
+read_melt <- function(files, gene) {
+  map_dfr(seq_along(files), function(i) {
+    melt <- read_excel(files[i], sheet = "Melt Curve Result", skip = 41) %>%
+      clean_names()
+    results <- read_excel(files[i], sheet = "Results", skip = 41) %>%
+      clean_names() %>%
+      mutate(well = as.character(well),
+             well_position = as.character(well_position)) %>%
+      dplyr::select(well, well_position, task, sample_name) %>%
+      distinct()
+    melt %>%
+      mutate(well = as.character(well),
+             well_position = as.character(well_position)) %>%
+      left_join(results, by = c("well", "well_position")) %>%
+      mutate(
+        tm = suppressWarnings(as.numeric(tm)),
+        melt_peak_height = suppressWarnings(as.numeric(melt_peak_height)),
+        plate = extract_plate_num(files[i]),
+        gene = gene)
+  })
+}
+```
+
+## 1.5 Load Data
+
+Calls `read_qpcr()` to import all plate data:
+
+`ef1a_all` — all ef1a housekeeping gene plates combined into one data frame
+`target_data` — a named list where each element (e.g., `target_data[["dddL"]]`) is the combined data frame for that target gene
+`all_data` — everything row-bound together (ef1a + all targets) for QC sections that need to loop across all genes at once
+
+```{r import-data}
+ef1a_all <- read_qpcr(ef1a_files, "ef1a")
+
+target_data <- map(target_names, function(g) {
+  read_qpcr(target_genes[[g]]$files, g)
+}) %>% set_names(target_names)
+
+# Combined data frame for QC sections
+all_data <- bind_rows(ef1a_all, bind_rows(target_data))
+```
+
+## 1.6 Load Metadata
+
+Reads the experiment metadata spreadsheet and prepares it for merging with qPCR data:
+
+`sample_name` is zero-padded to 3 digits (e.g., `"001"`) to match the format used in QuantStudio exports.
+`sampling_day` is converted to a factor with the predefined `day_levels` ordering.
+`treatment` is recoded from raw codes ("control", "ISOA", etc.) to display labels ("FASW", "Labrenzia", etc.) using the `treatment_levels` lookup, and set as a factor in the desired plot order.
+
+```{r load-metadata}
+metadata <- read_excel(paste0(data_dir, "prj014_qPCR_metadata.xlsx")) %>%
+  clean_names() %>%
+  filter(!is.na(dna_concentration)) %>%
+  mutate(
+    sample_name = str_pad(as.character(sample_number), width = 3, pad = "0"),
+    sampling_day = factor(sampling_day, levels = day_levels),
+    treatment = factor(treatment_levels[as.character(treatment)],
+                       levels = treatment_levels))
+
+cat("Samples used for qPCR assays:", nrow(metadata), "\n")
+```
+
+---
+
+# 2. qPCR Assay Quality Control
+
+## 2.1 NTC Summary
+
+Checks No Template Control (NTC) wells for contamination. Any NTC amplification indicates contamination or primer dimer. For each gene, this counts the total NTC wells, how many showed amplification (non-NA Ct), and the mean Ct of those that amplified. Ideally all NTCs should show `n_amplified = 0`.
+
+```{r ntc-summary}
+all_ntc <- all_data %>% filter(task == "NTC")
+
+ntc_summary <- all_ntc %>%
+  group_by(gene) %>%
+  summarise(
+    n_wells = n(),
+    n_amplified = sum(!is.na(ct)),
+    mean_ct = round(mean(ct, na.rm = TRUE), 1),
+    .groups = "drop")
+
+knitr::kable(ntc_summary,
+  col.names = c("Gene", "NTC Wells", "Amplified", "Mean Ct (amplified)"),
+  caption = "NTC amplification summary")
+```
+
+If any NTC wells amplified, this prints a detailed table showing which gene, plate, well position, and Ct value. This helps identify whether contamination is systemic or isolated to a specific plate/well. If no NTCs amplified, it prints a clean bill of health.
+
+```{r ntc-detail}
+ntc_amplified <- all_ntc %>%
+  filter(!is.na(ct)) %>%
+  dplyr::select(gene, plate, well_position, ct) %>%
+  arrange(gene, plate)
+
+if (nrow(ntc_amplified) > 0) {
+  cat("NTC wells with amplification:\n")
+  knitr::kable(ntc_amplified, digits = 1)
+} else {
+  cat("All NTC wells clean — no amplification detected.\n")
+}
+```
+
+### NTC Ct Floor 
+
+For plates where NTCs amplified, any sample well with Ct at or above the NTC Ct cannot be distinguished from contamination. The NTC Ct floor is set per gene per plate as the minimum NTC Ct on that plate. Sample wells at or above this threshold will have their copy number set to 0 during data processing (Section 3.1).
+
+```{r ntc-ct-floor}
+# Calculate per-gene, per-plate NTC Ct floor
+ntc_ct_floor <- all_ntc %>%
+  filter(!is.na(ct)) %>%
+  group_by(gene, plate) %>%
+  summarise(ntc_ct_floor = min(ct), .groups = "drop")
+
+if (nrow(ntc_ct_floor) > 0) {
+  knitr::kable(ntc_ct_floor %>% mutate(ntc_ct_floor = round(ntc_ct_floor, 1)),
+    col.names = c("Gene", "Plate", "NTC Ct Floor"),
+    caption = "NTC Ct floor per gene and plate — sample wells with Ct >= this value are set to 0")
+} else {
+  cat("No NTC amplification — no Ct floor needed.\n")
+}
+```
+
+## 2.2 Standard Curve Quality
+
+Extracts and grades the standard curve metrics that QuantStudio calculated for each gene × plate combination. Pulls R², slope, y-intercept, and efficiency from the first row of each plate. Assigns a quality grade:
+
+**Passing MIQE** — R² ≥ 0.98, efficiency 90–110% (gold standard per MIQE guidelines)
+**Acceptable** — R² ≥ 0.98, efficiency 88–112%
+**Poor** — anything worse
+
+This is a key QC checkpoint — poor standard curves mean the copy number estimates from that plate are unreliable.
+
+```{r std-curve-stats}
+std_stats <- all_data %>%
+  filter(!is.na(r_superscript_2)) %>%
+  group_by(gene, plate) %>%
+  summarise(
+    r_squared  = first(r_superscript_2),
+    slope      = first(slope),
+    intercept  = first(y_intercept),
+    efficiency = first(efficiency),
+    .groups = "drop") %>%
+  mutate(
+    grade = case_when(
+      r_squared >= 0.98 & efficiency >= 90 & efficiency <= 110 ~ "Passing MIQE",
+      r_squared >= 0.98 & efficiency >= 88 & efficiency <= 112 ~ "Acceptable",
+      TRUE ~ "Poor"))
+
+knitr::kable(
+  std_stats %>%
+    mutate(r_squared = round(r_squared, 4),
+           slope = round(slope, 2),
+           intercept = round(intercept, 1),
+           efficiency = round(efficiency, 1)),
+  col.names = c("Gene", "Plate", "R²", "Slope", "Intercept", "Efficiency (%)", "Grade"),
+  caption = "Standard curve metrics per plate (from QuantStudio)")
+```
+
+Scatter plot of log10(copy number) vs Ct for all standard wells, faceted by gene. Each plate gets its own color and linear regression line. Visually confirms that standard curves are linear, parallel across plates, and span the expected dynamic range.
+
+```{r std-curve-plot, fig.width=12, fig.height=6}
+all_standards <- all_data %>%
+  filter(task == "STANDARD", !is.na(ct), !is.na(quantity), quantity > 0) %>%
+  mutate(log_qty = log10(quantity))
+
+ggplot(all_standards, aes(x = log_qty, y = ct, color = factor(plate))) +
+  geom_point(alpha = 0.7, size = 2) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.6) +
+  facet_wrap(~ gene, scales = "free") +
+  labs(x = "log10(Quantity, copy number)", y = "Ct",
+       title = "Standard Curves by Gene and Plate",
+       color = "Plate") +
+  theme_bw(base_size = 13)
+```
+
+## 2.3 Melt Curve QC
+
+Reads the melt curve data from all plates (for both ef1a and all target genes) and determines the expected product melting temperature (Tm) for each gene. The expected Tm is calculated as the **median Tm of STANDARD wells** — standards contain known target, so their melt peak defines "on-target." This expected Tm is used downstream to classify sample wells as on-target vs off-target.
+
+```{r melt-curve-analysis}
+all_melt <- bind_rows(
+  read_melt(ef1a_files, "ef1a"),
+  map_dfr(target_names, function(g) read_melt(target_genes[[g]]$files, g)))
+
+product_tm <- all_melt %>%
+  filter(task == "STANDARD", !is.na(tm), tm > 70) %>%
+  group_by(gene) %>%
+  summarise(expected_tm = median(tm, na.rm = TRUE), .groups = "drop")
+
+cat("Expected product Tm per gene:\n")
+print(product_tm)
+```
+
+Histogram of all melt peak Tm values, faceted by gene and colored by well type (UNKNOWN = samples, STANDARD = standards, NTC = no-template controls). The red dashed line marks the expected product Tm (from standards). This plot reveals:
+
+ - Whether sample peaks cluster tightly around the expected Tm (good specificity)
+ - Whether there's a second peak population at a lower Tm (primer dimer)
+ - Whether NTCs show any peaks (contamination)
+
+```{r melt-curve-histogram, fig.width=12, fig.height=5}
+melt_plot_data <- all_melt %>%
+  filter(!is.na(tm)) %>%
+  left_join(product_tm, by = "gene") %>%
+  mutate(task = replace_na(task, "UNKNOWN"))
+
+ggplot(melt_plot_data, aes(x = tm, fill = task)) +
+  geom_histogram(binwidth = 1, alpha = 0.7, position = "identity") +
+  geom_vline(data = product_tm, aes(xintercept = expected_tm),
+             linetype = "dashed", color = "red", linewidth = 0.7) +
+  facet_wrap(~ gene, scales = "free_y") +
+  scale_fill_manual(values = c("UNKNOWN" = "steelblue", "STANDARD" = "orange",
+                                "NTC" = "grey50")) +
+  labs(x = "Melt Peak Tm (°C)", y = "Number of wells",
+       title = "Melt Curve Tm Distribution",
+       subtitle = "Red dashed line = expected product Tm",
+       fill = "Well type") +
+  theme_bw(base_size = 12)
+```
+
+Classifies every well based on its melt curve. For each well:
+
+- Counts the number of melt peaks (`n_peaks`)
+- Identifies the dominant peak (highest melt peak height)
+- Checks if any peak falls within ±2°C of the expected product Tm (`tm_on_target`)
+- Labels the well as "On-target", "Off-target", or "NTC"
+- Flags multi-peak wells (`multi_peak = TRUE`) — multiple peaks suggest non-specific amplification or primer dimer alongside the real product
+
+Then summarizes per gene: total wells, number/percentage with multiple peaks, and number/percentage off-target.
+
+```{r melt-well-classification}
+melt_well_summary <- all_melt %>%
+  filter(!is.na(tm)) %>%
+  left_join(product_tm, by = "gene") %>%
+  group_by(gene, plate, well, well_position, task, sample_name) %>%
+  summarise(
+    n_peaks = n(),
+    dominant_tm = tm[which.max(suppressWarnings(as.numeric(melt_peak_height)))],
+    tm_on_target = any(abs(tm - expected_tm) <= 2),
+    .groups = "drop") %>%
+  mutate(
+    multi_peak = n_peaks > 1,
+    well_status = case_when(
+      task == "NTC" ~ "NTC",
+      multi_peak & tm_on_target ~ "Multi-peak",
+      multi_peak & !tm_on_target ~ "Off-target",
+      tm_on_target ~ "On-target",
+      TRUE ~ "Off-target"))
+
+melt_gene_summary <- melt_well_summary %>%
+  filter(task != "NTC") %>%
+  group_by(gene) %>%
+  summarise(
+    n_wells = n(),
+    n_multi_peak = sum(multi_peak),
+    pct_multi_peak = round(100 * n_multi_peak / n_wells, 1),
+    n_off_target = sum(well_status == "Off-target"),
+    pct_off_target = round(100 * n_off_target / n_wells, 1),
+    .groups = "drop")
+
+knitr::kable(melt_gene_summary,
+  col.names = c("Gene", "Total wells", "Multi-peak", "% Multi-peak",
+                "Off-target", "% Off-target"),
+  caption = "Melt curve QC summary (excluding NTCs)")
+```
+
+### Multi-peak wells by treatment
+
+Multi-peak wells are excluded from quantification (the copy number reflects combined amplification of target + non-specific product and cannot be attributed to the target alone). This breakdown shows which treatments and timepoints are most affected, to assess whether the exclusion introduces systematic bias.
+
+```{r multi-peak-by-treatment, fig.width=12, fig.height=6}
+# Join multi-peak well info with metadata
+multi_peak_detail <- melt_well_summary %>%
+  filter(task == "UNKNOWN", multi_peak) %>%
+  mutate(sample_name = str_pad(as.character(sample_name), width = 3, pad = "0")) %>%
+  left_join(
+    metadata %>% dplyr::select(sample_name, treatment, sampling_day),
+    by = "sample_name") %>%
+  filter(!is.na(treatment))
+
+if (nrow(multi_peak_detail) == 0) {
+  cat("No multi-peak wells detected in any sample wells.\n")
+}
+```
+
+### Per-sample melt status (target genes)
+
+A sample is classified as **melt-pass** if ≥2/3 of its tech rep wells show an on-target melt peak. Samples with off-target melt and a nonzero copy number have their copy number set to NA — the Ct reflects primer dimer, not real target product. Samples with no amplification (copy number = 0) are kept as 0 regardless of melt status.
+
+Aggregates the per-well melt classifications up to the sample level for each target gene. For each sample:
+
+ - Counts how many of its tech rep wells were on-target vs off-target
+ - Assigns a melt status: **"pass"** (≥2 wells on-target), **"marginal"** (exactly 1 well on-target), or **"fail"** (0 wells on-target)
+ - Calculates the percentage of wells that were on-target
+
+This is the basis for the melt-curve filtering applied in Section 3.2. Failed samples with nonzero Ct get their copy numbers set to NA because the amplification signal came from non-specific product, not the intended target.
+
+```{r melt-per-sample}
+# Calculate per-sample melt status for each target gene
+# Only single-peak on-target wells count as "On-target" — multi-peak wells are excluded
+# from quantification even if one peak matches the expected Tm
+melt_per_sample <- map_dfr(target_names, function(g) {
+  melt_well_summary %>%
+    filter(gene == g, task == "UNKNOWN", !is.na(sample_name)) %>%
+    mutate(sample_name = str_pad(as.character(sample_name), width = 3, pad = "0")) %>%
+    group_by(sample_name) %>%
+    summarise(
+      n_wells = n(),
+      n_on_target = sum(well_status == "On-target"),
+      n_multi_peak = sum(well_status == "Multi-peak"),
+      n_off_target = sum(well_status == "Off-target"),
+      .groups = "drop") %>%
+    mutate(
+      gene = g,
+      melt_status = case_when(
+        n_on_target >= 2 ~ "pass",
+        n_on_target == 1 ~ "marginal",
+        TRUE ~ "fail"),
+      pct_on_target = round(100 * n_on_target / n_wells, 0))
+})
+```
+
+```{r melt-join-metadata}
+melt_with_meta <- melt_per_sample %>%
+  left_join(
+    metadata %>% dplyr::select(sample_name, treatment, sampling_day),
+    by = "sample_name")
+```
+
+Heatmap for each target gene showing the melt curve on-target rate by treatment × timepoint (post-inoculation only). Each tile shows `n_pass / n_total` (how many samples passed out of the total), with fill color proportional to the mean percentage of on-target wells. This gives a visual overview of where the assay worked well vs where non-specific amplification was a problem.
+
+```{r melt-heatmap, fig.width=12, fig.height=5, results='asis'}
+for (g in target_names) {
+  g_wells <- melt_well_summary %>%
+    filter(gene == g, task == "UNKNOWN") %>%
+    mutate(sample_name = str_pad(as.character(sample_name), width = 3, pad = "0")) %>%
+    left_join(metadata %>% dplyr::select(sample_name, treatment, sampling_day),
+              by = "sample_name") %>%
+    filter(!is.na(treatment), sampling_day %in% post_inoc_days) %>%
+    group_by(treatment, sampling_day) %>%
+    summarise(
+      n_wells = n(),
+      n_on_target = sum(well_status == "On-target"),
+      pct_on_target = n_on_target / n_wells,
+      .groups = "drop") %>%
+    mutate(sampling_day = factor(sampling_day, levels = post_inoc_days))
+
+  if (nrow(g_wells) > 0) {
+    print(
+      ggplot(g_wells, aes(x = sampling_day, y = treatment, fill = pct_on_target)) +
+        geom_tile(color = "white", linewidth = 0.5) +
+        geom_text(aes(label = paste0(n_on_target, "/", n_wells)), size = 3.5) +
+        scale_fill_gradient(low = "grey90", high = "#2166AC",
+                            limits = c(0, 1), labels = percent_format(),
+                            name = "% wells\non-target") +
+        labs(x = "Days Post-Inoculation", y = "Treatment",
+             title = paste0(g, " (", target_genes[[g]]$organism,
+                            ") Melt Curve: On-Target Rate by Treatment & Timepoint"),
+             subtitle = "Label = on-target wells / total wells") +
+        theme_minimal(base_size = 13) +
+        theme(panel.grid = element_blank()))
+    cat("\n\n")
+  }
+}
+```
+
+## 2.4 Technical Replicate Agreement
+
+Assesses how well technical replicates (same sample run in multiple wells on the same plate) agree with each other. For each sample with ≥2 reps, calculates the mean and SD of Ct values. Then summarizes per gene:
+
+**Median / Mean SD** — typical within-sample Ct variability. Good assays have median SD < 0.5.
+**P95 SD** — 95th percentile; shows the worst-case variability
+**% SD < 0.5** — fraction of samples meeting the tight-agreement threshold
+**Flagged (SD > 1.0)** — samples with very poor rep agreement (>1 cycle apart), which may indicate pipetting error, well-position effects, or marginal template concentration
+
+```{r tech-rep-stats}
+tech_rep_samples <- all_data %>%
+  filter(task == "UNKNOWN", !is.na(ct)) %>%
+  group_by(gene, plate, sample_name) %>%
+  filter(n() >= 2) %>%
+  summarise(
+    n_reps = n(),
+    mean_ct = mean(ct, na.rm = TRUE),
+    sd_ct = sd(ct, na.rm = TRUE),
+    .groups = "drop")
+
+tech_rep_summary <- tech_rep_samples %>%
+  group_by(gene) %>%
+  summarise(
+    n_samples = n(),
+    median_sd = round(median(sd_ct, na.rm = TRUE), 3),
+    mean_sd = round(mean(sd_ct, na.rm = TRUE), 3),
+    p95_sd = round(quantile(sd_ct, 0.95, na.rm = TRUE), 3),
+    pct_sd_lt_0.5 = round(100 * mean(sd_ct < 0.5, na.rm = TRUE), 1),
+    n_flagged = sum(sd_ct > 1.0, na.rm = TRUE),
+    .groups = "drop")
+
+knitr::kable(tech_rep_summary,
+  col.names = c("Gene", "N samples", "Median SD", "Mean SD", "P95 SD",
+                "% SD<0.5", "Flagged (SD>1)"),
+  caption = "Technical replicate Ct agreement — sample wells")
+```
+
+Scatter plot of mean Ct vs SD of Ct for each sample's tech reps, faceted by gene. The red dashed line (SD = 1.0) marks the flagging threshold; orange dotted line (SD = 0.5) marks the ideal threshold. Points above the red line warrant investigation. This plot also reveals whether poor agreement correlates with high Ct (low template). Stochastic amplification at the detection limit naturally increases variability.
+
+```{r tech-rep-scatter, fig.width=12, fig.height=5}
+lowest_std_ct <- all_data %>%
+  filter(task == "STANDARD", !is.na(ct), !is.na(quantity), quantity > 0) %>%
+  group_by(gene) %>%
+  filter(quantity == min(quantity)) %>%
+  summarise(mean_ct_lowest_std = mean(ct), .groups = "drop")
+
+ggplot(tech_rep_samples, aes(x = mean_ct, y = sd_ct, color = gene)) +
+  geom_point(alpha = 0.4, size = 1.5) +
+  geom_hline(yintercept = 1.0, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 0.5, linetype = "dotted", color = "orange") +
+  geom_vline(data = lowest_std_ct, aes(xintercept = mean_ct_lowest_std),
+             linetype = "dashed", color = "darkgreen", linewidth = 0.5) +
+  facet_wrap(~ gene, scales = "free_x") +
+  labs(x = "Mean Ct", y = "SD of Ct across tech reps",
+       title = "Technical Replicate Agreement vs Amplification Level",
+       subtitle = "Red = SD 1.0 (flagged) | Orange = SD 0.5 | Green = lowest standard Ct") +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "none")
+```
+
+
+
+## 2.5 Limit of Detection (LOD) & Limit of Quantification (LOQ)
+
+**LOD (Limit of Detection)** is the lowest copy number at which the assay reliably detects the target. Since all standard dilutions amplified on every plate, LOD is set to the lowest standard concentration in the dilution series.
+
+**LOQ (Limit of Quantification)** is the lowest copy number at which the assay can *accurately measure* the quantity. LOQ is determined from the Cq coefficient of variation (CV) across technical replicates at each standard concentration. The Cq CV is calculated as `sqrt(2^(sd_ct² × ln2) − 1)` (Hellemans et al. 2007), which converts Ct-scale variability into a proportional CV on the copy number scale. This is computed **per plate per concentration**, then averaged across plates to isolate within-plate tech rep noise from plate-to-plate Ct shifts. The best-fitting model (linear, polynomial, or asymptotic decay) of mean CV vs log10(copy number) identifies where CV crosses the 35% threshold — the LOQ. LOQ is constrained to be ≥ LOD.
+
+**Why 35% CV?** At 35% CV, the 95% confidence interval on a measurement spans roughly ±0.7-fold of the true value (i.e., a measured value of 100 copies could be anywhere from ~50–170). This is a commonly used threshold in qPCR that balances quantitative reliability with sensitivity — stricter thresholds (e.g., 25%) exclude more low-abundance data, while looser thresholds (e.g., 50%) accept measurements with poor precision. The 35% threshold is consistent with MIQE-adjacent recommendations for environmental and low-template qPCR applications. (Klymus et al. 2020)
+
+Defines and runs `calc_lod_loq()` for each gene (ef1a + all targets). The function:
+1. **LOD**: Simply takes the minimum copy number among all standard wells for that gene — this is the lowest dilution that amplified.
+2. **LOQ via Cq CV modeling**:
+    - Removes outlier tech reps (Ct > 1.5 cycles from plate-level median at each concentration)
+    - Calculates Cq CV per plate per standard concentration using the Hellemans formula: `sqrt(2^(sd_ct² × ln2) − 1)`
+    - Averages the CV across plates at each concentration (isolates within-plate noise)
+    - Fits three candidate models to the CV-vs-copy-number relationship: linear, 2nd-degree polynomial, and asymptotic decay (NLS)
+    - Selects the best model by lowest residual standard error (sigma)
+    - Uses the best model to predict CV across a fine grid of copy numbers, and finds the lowest copy number where predicted CV drops below 35%
+    - Falls back to direct lookup in the raw data if no model fits
+    - Constrains LOQ ≥ LOD (can't quantify below detection)
+
+The results are collected into a table and printed. Each gene's LOD, LOQ, model fit data, and best model name are stored for the LOQ plot below.
+
+```{r calc-lod-loq}
+calc_lod_loq <- function(all_data, gene_name) {
+  stds <- all_data %>%
+    filter(gene == gene_name, task == "STANDARD", !is.na(ct),
+           !is.na(quantity), quantity > 0)
+
+  # ── LOD = lowest standard concentration ──
+  lod_copy <- min(stds$quantity)
+
+  # ── LOQ via Cq CV (per plate, then averaged) ──
+  stds_clean <- stds %>%
+    group_by(plate, quantity) %>%
+    mutate(median_ct = median(ct),
+           ct_deviation = abs(ct - median_ct),
+           is_outlier = ct_deviation > outlier_ct_cutoff) %>%
+    ungroup() %>%
+    filter(!is_outlier)
+
+  per_plate_cv <- stds_clean %>%
+    group_by(plate, quantity) %>%
+    filter(n() >= 2) %>%
+    summarise(
+      n_reps = n(), sd_ct = sd(ct),
+      cq_cv = sqrt(2^(sd(ct)^2 * log(2)) - 1),
+      .groups = "drop") %>%
+    filter(!is.na(cq_cv), is.finite(cq_cv))
+
+  loq_summary <- per_plate_cv %>%
+    group_by(quantity) %>%
+    summarise(n_plates = n(), mean_cv = mean(cq_cv), .groups = "drop") %>%
+    rename(cq_cv = mean_cv) %>%
+    filter(cq_cv > 0) %>%
+    arrange(quantity)
+
+  loq_copy <- NA
+  best_loq_name <- NA
+  loq_newdata <- NULL
+
+  if (nrow(loq_summary) >= 3) {
+    loq_models <- list()
+    tryCatch({loq_models[["linear"]] <- lm(cq_cv ~ log10(quantity),
+              data = loq_summary)}, error = function(e) NULL)
+    tryCatch({loq_models[["poly2"]] <- lm(cq_cv ~ poly(log10(quantity), 2),
+              data = loq_summary)}, error = function(e) NULL)
+    tryCatch({loq_models[["decay"]] <- nls(
+              cq_cv ~ SSasymp(log10(quantity), Asym, R0, lrc),
+              data = loq_summary)}, error = function(e) NULL)
+
+    if (length(loq_models) > 0) {
+      model_sigmas <- sapply(loq_models, function(m) summary(m)$sigma)
+      best_loq_name <- names(which.min(model_sigmas))
+      best_loq <- loq_models[[best_loq_name]]
+      loq_newdata <- data.frame(quantity = round(
+        10^seq(0, log10(max(loq_summary$quantity)), length.out = 1000)))
+      loq_newdata$cq_cv <- predict(best_loq, loq_newdata)
+      below <- loq_newdata %>% filter(cq_cv <= loq_cv_threshold)
+      if (nrow(below) > 0) loq_copy <- min(below$quantity)
+    }
+  }
+  if (is.na(loq_copy) && nrow(loq_summary) > 0) {
+    direct_below <- loq_summary %>% filter(cq_cv <= loq_cv_threshold)
+    if (nrow(direct_below) > 0) loq_copy <- min(direct_below$quantity)
+  }
+  if (!is.na(lod_copy) && (is.na(loq_copy) || loq_copy < lod_copy)) loq_copy <- lod_copy
+
+  list(
+    result = tibble(gene = gene_name, lod = lod_copy, loq = loq_copy),
+    loq_summary = loq_summary %>% mutate(gene = gene_name),
+    loq_newdata = if (!is.null(loq_newdata)) loq_newdata %>% mutate(gene = gene_name) else NULL,
+    best_model = best_loq_name)
+}
+
+all_genes_for_lod <- c("ef1a", target_names)
+lod_loq_results <- map(all_genes_for_lod, function(g) calc_lod_loq(all_data, g)) %>%
+  set_names(all_genes_for_lod)
+
+lod_loq <- bind_rows(map(lod_loq_results, "result"))
+
+knitr::kable(lod_loq,
+  col.names = c("Gene", "LOD (copies/rxn)", "LOQ (copies/rxn)"),
+  caption = "LOD and LOQ from pooled standard curves")
+```
+
+Plots the Cq CV vs copy number for each gene (log10 x-axis), faceted by gene. Shows:
+
+ - **Black points** — observed mean CV at each standard concentration
+ - **Blue line** — best-fit model curve
+ - **Orange dashed** — the 35% CV threshold (LOQ boundary)
+ - **Red dashed** — LOD (lowest standard)
+ - **Green dashed** — LOQ (where the model crosses the CV threshold)
+
+The caption notes which model was selected for each gene. This plot is the visual check that the LOQ determination is reasonable.
+
+```{r loq-cv-plot, fig.width=12, fig.height=5}
+loq_plot_data <- bind_rows(map(lod_loq_results, "loq_summary"))
+loq_curve_data <- bind_rows(compact(map(lod_loq_results, "loq_newdata")))
+
+best_model_labels <- paste(
+  map_chr(all_genes_for_lod, function(g) paste0(g, " = ", lod_loq_results[[g]]$best_model)),
+  collapse = ", ")
+
+ggplot(loq_plot_data, aes(x = quantity, y = cq_cv)) +
+  geom_point(size = 3) +
+  {if (nrow(loq_curve_data) > 0)
+    geom_line(data = loq_curve_data, aes(x = quantity, y = cq_cv),
+              color = "steelblue", linewidth = 0.8)} +
+  geom_hline(yintercept = loq_cv_threshold, linetype = "dashed", color = "orange") +
+  geom_vline(data = lod_loq, aes(xintercept = lod),
+             linetype = "dashed", color = "red", linewidth = 0.5) +
+  geom_vline(data = lod_loq, aes(xintercept = loq),
+             linetype = "dashed", color = "darkgreen", linewidth = 0.5) +
+  facet_wrap(~ gene, scales = "free") +
+  scale_x_log10(labels = comma) +
+  labs(x = "Copy Number (copies/rxn)", y = "Cq CV",
+       title = "LOQ: Cq Coefficient of Variation vs Copy Number",
+       subtitle = paste0("Orange = CV threshold (", loq_cv_threshold,
+                         ") | Red = LOD | Green = LOQ"),
+       caption = paste0("Best model: ", best_model_labels)) +
+  theme_bw(base_size = 12)
+```
+
+---
+
+# 3. Data Processing
+
+Copy numbers were calculated by QuantStudio from standard curves included on each plate. For each biological sample, the mean copy number is computed across technical replicates.
+
+## 3.1 Mean Copy Number per Sample
+
+Computes the mean copy number across technical replicates for each biological sample, applying several QC filters:
+
+1. **NTC floor** — sample wells with Ct at or above the NTC Ct floor for that gene × plate are set to 0 (indistinguishable from contamination)
+2. **Multi-peak exclusion** — wells with multiple melt peaks are excluded from quantification (copy number reflects mixed products)
+3. **Outlier tech rep removal** — within each sample, tech reps whose Ct deviates > 1.5 cycles from the sample median are removed
+4. **NA handling** — "Undetermined" wells (NA quantity) are dropped from the average, not converted to 0. A sample is assigned 0 only when *all* reps are NA (truly non-detected). This prevents artificially deflating means when one rep fails to amplify.
+
+```{r calc-sample-means}
+calc_sample_means <- function(df, gene, ntc_floor_df, melt_well_df = NULL) {
+  mean_col <- paste0(gene, "_mean_copynum")
+  sd_col   <- paste0(gene, "_sd_copynum")
+  n_col    <- paste0(gene, "_n_reps")
+  n_excluded_col <- paste0(gene, "_n_excluded")
+
+  wells <- df %>%
+    filter(task == "UNKNOWN") %>%
+    mutate(sample_name = str_pad(as.character(sample_name), width = 3, pad = "0"))
+
+  # ── NTC floor: zero out wells with Ct >= NTC threshold ──
+  gene_ntc <- ntc_floor_df %>% filter(gene == !!gene)
+  if (nrow(gene_ntc) > 0) {
+    wells <- wells %>%
+      left_join(gene_ntc %>% dplyr::select(plate, ntc_ct_floor), by = "plate") %>%
+      mutate(
+        ntc_flagged = !is.na(ntc_ct_floor) & !is.na(ct) & ct >= ntc_ct_floor,
+        quantity = ifelse(ntc_flagged, 0, quantity),
+        ct = ifelse(ntc_flagged, NA_real_, ct)) %>%
+      dplyr::select(-ntc_ct_floor)
+  } else {
+    wells <- wells %>% mutate(ntc_flagged = FALSE)
+  }
+
+  # ── Multi-peak exclusion: drop wells flagged as multi-peak ──
+  if (!is.null(melt_well_df)) {
+    multi_peak_wells <- melt_well_df %>%
+      filter(gene == !!gene, well_status == "Multi-peak") %>%
+      dplyr::select(plate, well, well_position) %>%
+      mutate(is_multi_peak = TRUE)
+
+    wells <- wells %>%
+      left_join(multi_peak_wells, by = c("plate", "well", "well_position")) %>%
+      mutate(is_multi_peak = replace_na(is_multi_peak, FALSE)) %>%
+      filter(!is_multi_peak) %>%
+      dplyr::select(-is_multi_peak)
+  }
+
+  # ── Outlier tech rep removal: Ct > 1.5 cycles from sample median ──
+  wells <- wells %>%
+    group_by(sample_name) %>%
+    mutate(
+      median_ct = median(ct, na.rm = TRUE),
+      ct_deviation = abs(ct - median_ct),
+      is_outlier = !is.na(ct_deviation) & ct_deviation > outlier_ct_cutoff) %>%
+    ungroup()
+
+  n_outliers <- sum(wells$is_outlier, na.rm = TRUE)
+  n_ntc_flagged <- sum(wells$ntc_flagged, na.rm = TRUE)
+  cat(gene, ": removed", n_outliers, "outlier tech reps (Ct > 1.5 from median),",
+      n_ntc_flagged, "wells below NTC floor\n")
+
+  wells_clean <- wells %>% filter(!is_outlier)
+
+  # ── Compute means: NA reps are dropped, not converted to 0 ──
+  wells_clean %>%
+    group_by(sample_name) %>%
+    summarise(
+      !!mean_col := ifelse(all(is.na(quantity)), 0,
+                           mean(quantity, na.rm = TRUE)),
+      !!sd_col   := sd(quantity, na.rm = TRUE),
+      !!n_col    := sum(!is.na(quantity)),
+      !!n_excluded_col := sum(is.na(quantity)),
+      .groups = "drop")
+}
+
+ef1a_means <- calc_sample_means(ef1a_all, "ef1a", ntc_ct_floor)
+target_means <- map(target_names, function(g) {
+  calc_sample_means(target_data[[g]], g, ntc_ct_floor, melt_well_summary)
+}) %>% set_names(target_names)
+```
+
+## 3.2 Merge with Metadata
+
+Merge copy numbers, melt curve QC, and metadata. Samples with off-target melt and a nonzero copy number have that copy number set to NA — the Ct reflects non-specific product (primer dimer) rather than real target. Samples with no amplification (copy number = 0) are kept as 0 regardless of melt status.
+
+Builds the master data frame by joining metadata + ef1a means + each target gene's means + melt curve flags. For each target gene:
+
+ - Joins the sample-level mean copy numbers
+ - Joins the per-sample melt status (pass/marginal/fail) and percent on-target
+ - Creates a `{gene}_trusted` flag: `TRUE` if the melt was on-target (pass), or if the sample had no amplification (copy number = 0). `FALSE` if the melt was off-target but the sample showed amplification — these are the samples whose copy numbers will be set to NA later (the signal was from non-specific product).
+
+After merging, filters out baseline/pre-treatment samples and any rows with missing treatment or timepoint. Prints a count of how many samples per gene were invalidated by the melt filter.
+
+```{r merge-metadata}
+# Start with metadata + ef1a
+merged <- metadata %>%
+  left_join(ef1a_means, by = "sample_name")
+
+# Add each target gene's means and melt flags
+for (g in target_names) {
+  mean_col <- paste0(g, "_mean_copynum")
+  melt_col <- paste0(g, "_melt_status")
+  trust_col <- paste0(g, "_trusted")
+
+  # Melt flags for this gene
+  g_melt <- melt_per_sample %>%
+    filter(gene == g) %>%
+    dplyr::select(sample_name, melt_status, pct_on_target) %>%
+    rename(!!melt_col := melt_status,
+           !!paste0(g, "_pct_on_target") := pct_on_target)
+
+  merged <- merged %>%
+    left_join(target_means[[g]], by = "sample_name") %>%
+    left_join(g_melt, by = "sample_name") %>%
+    mutate(
+      !!trust_col := case_when(
+        is.na(.data[[melt_col]]) ~ TRUE,
+        .data[[melt_col]] == "pass" ~ TRUE,
+        is.na(.data[[mean_col]]) | .data[[mean_col]] == 0 ~ TRUE,
+        TRUE ~ FALSE))
+}
+
+merged <- merged %>%
+  filter(!(sampling_day %in% c("baseline")),
+         !is.na(treatment),
+         !is.na(sampling_day))
+
+cat("Samples in merged dataset:", nrow(merged), "\n")
+for (g in target_names) {
+  trust_col <- paste0(g, "_trusted")
+  cat(g, "samples set to NA (off-target melt + nonzero Ct):",
+      sum(!merged[[trust_col]], na.rm = TRUE), "\n")
+}
+```
+
+For each target gene, prints a table showing the melt-curve filtering outcome by treatment: total samples, how many passed, failed, and how many had their copy number set to NA. This is the accountability table — it documents exactly how many data points were removed and from which treatments, so you can evaluate whether the filtering is disproportionately affecting certain groups.
+
+```{r melt-filter-summary}
+for (g in target_names) {
+  melt_col <- paste0(g, "_melt_status")
+  trust_col <- paste0(g, "_trusted")
+
+  g_table <- merged %>%
+    filter(!is.na(.data[[melt_col]])) %>%
+    group_by(treatment) %>%
+    summarise(
+      n_total = n(),
+      n_pass = sum(.data[[melt_col]] == "pass"),
+      n_marginal = sum(.data[[melt_col]] == "marginal"),
+      n_fail = sum(.data[[melt_col]] == "fail"),
+      n_set_to_NA = sum(!.data[[trust_col]]),
+      .groups = "drop")
+
+  cat("\n")
+  print(knitr::kable(g_table,
+    col.names = c("Treatment", "Total", "Melt Pass", "Marginal", "Melt Fail", "Set to NA"),
+    caption = paste0(g, " melt curve filtering — samples with off-target Tm + nonzero Ct are set to NA")))
+}
+```
+
+---
+
+# 4. Sample Quality Control
+
+## 4.1 qPCR Sample Coverage
+
+Coverage tables showing how many biological samples have non-NA copy number data at each treatment × timepoint, broken out per gene. This reveals gaps in plate coverage.
+
+```{r replicate-counts}
+post_inoc_meta <- merged %>% filter(sampling_day %in% post_inoc_days)
+
+# ── Per-gene coverage ──
+for (g in c("ef1a", target_names)) {
+  mean_col <- paste0(g, "_mean_copynum")
+
+  g_counts <- post_inoc_meta %>%
+    mutate(has_data = !is.na(.data[[mean_col]])) %>%
+    group_by(treatment, sampling_day) %>%
+    summarise(
+      coverage = paste0(sum(has_data), "/", n()),
+      .groups = "drop") %>%
+    pivot_wider(names_from = sampling_day, values_from = coverage, values_fill = "0/0")
+
+  cat("\n")
+  print(knitr::kable(g_counts, caption = paste0(g, " — samples with data per treatment × timepoint")))
+}
+
+# ── Overall: samples with data for ANY gene ──
+all_mean_cols <- paste0(c("ef1a", target_names), "_mean_copynum")
+
+samples_with_data <- post_inoc_meta %>%
+  filter(if_any(all_of(all_mean_cols), ~ !is.na(.x)))
+
+cat("\nTotal samples with any qPCR data:", nrow(samples_with_data),
+    "/ Total in metadata:", nrow(post_inoc_meta), "\n")
+
+# ── Samples missing from all assays ──
+samples_no_data <- post_inoc_meta %>%
+  filter(if_all(all_of(all_mean_cols), ~ is.na(.x)))
+
+if (nrow(samples_no_data) > 0) {
+  cat("\nWARNING:", nrow(samples_no_data), "samples have no qPCR data for any gene:\n")
+  print(samples_no_data %>% dplyr::select(sample_name, treatment, sampling_day))
+}
+```
+
+## 4.2 Ef1a Housekeeping Gene Stability
+
+> **`ef1a-stability-plot` chunk:** Box-and-jitter plot of ef1a copy number by timepoint, colored by treatment. A good housekeeping gene should show **stable expression** across all treatments and timepoints — if ef1a varies systematically with treatment, then normalizing targets to ef1a would introduce a confound. Looking for boxes at similar heights across treatments within each timepoint, and no obvious trend over time.
+
+```{r ef1a-stability-plot, fig.width=10, fig.height=6}
+post_inoc <- merged %>% filter(sampling_day %in% post_inoc_days)
+
+ggplot(post_inoc, aes(x = sampling_day, y = ef1a_mean_copynum, color = treatment)) +
+  geom_boxplot(alpha = 0.3, outlier.shape = NA) +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2), alpha = 0.6) +
+  scale_color_manual(values = palette) +
+  labs(x = "Timepoint", y = "Ef1a Copy Number",
+       title = "Ef1a Housekeeping Gene Stability Across Treatments") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Formal statistical test of ef1a stability. Runs a Kruskal-Wallis test (nonparametric ANOVA) at each timepoint asking: "does ef1a copy number differ significantly between treatments?" A significant result (p < 0.05) would flag that the housekeeping gene is not stable at that timepoint. Also runs an overall KW test pooling all timepoints. Ideally, all p-values should be non-significant ("ns"), confirming ef1a is a valid normalizer.
+
+```{r ef1a-stability-stats}
+ef1a_kw_per_day <- post_inoc %>%
+  group_by(sampling_day) %>%
+  summarise(
+    kw_p = kruskal.test(ef1a_mean_copynum ~ treatment)$p.value,
+    .groups = "drop") %>%
+  mutate(sig = ifelse(kw_p < 0.05, "*", "ns"))
+
+knitr::kable(ef1a_kw_per_day %>% mutate(kw_p = round(kw_p, 4)),
+  col.names = c("Timepoint", "KW p-value", "Sig"),
+  caption = "Kruskal-Wallis test for Ef1a stability across treatments per timepoint")
+
+ef1a_kw_overall <- kruskal.test(ef1a_mean_copynum ~ treatment, data = post_inoc)
+cat("\nOverall KW test: chi-sq =", round(ef1a_kw_overall$statistic, 2),
+    ", p =", format(ef1a_kw_overall$p.value, digits = 4), "\n")
+```
+
+---
+
+# 5. Normalization & Transformation
+
+## 5.1 Normalize Target Genes to Ef1a
+
+Samples where the melt curve was off-target (and had a nonzero Ct) have their copy number set to NA before normalization.
+
+For each target gene, creates two new columns:
+
+- **`{gene}_mean_copynum_clean`** — the copy number, but with melt-failed samples set to NA (using the `_trusted` flag). This is the "cleaned" copy number after melt filtering.
+- **`{gene}_norm`** — the cleaned copy number divided by ef1a copy number. This normalization accounts for differences in total DNA input and extraction efficiency between samples. A sample with twice as much DNA loaded will have ~2× higher ef1a *and* ~2× higher target, so the ratio cancels out the loading difference.
+
+Rebuilds `post_inoc` from the updated `merged` data frame (post-inoculation timepoints only). Prints how many samples were set to NA per gene.
+
+```{r normalize}
+# ── Check for ef1a = 0 or NA before normalization ──
+n_ef1a_zero <- sum(merged$ef1a_mean_copynum == 0, na.rm = TRUE)
+n_ef1a_na   <- sum(is.na(merged$ef1a_mean_copynum))
+if (n_ef1a_zero > 0 || n_ef1a_na > 0) {
+  cat("WARNING:", n_ef1a_zero, "samples have ef1a = 0 and", n_ef1a_na,
+      "have ef1a = NA. These cannot be normalized and will produce NA/Inf.\n")
+  cat("Affected samples:\n")
+  print(merged %>%
+    filter(ef1a_mean_copynum == 0 | is.na(ef1a_mean_copynum)) %>%
+    dplyr::select(sample_name, treatment, sampling_day, ef1a_mean_copynum))
+} else {
+  cat("ef1a check passed: no samples with ef1a = 0 or NA.\n")
+}
+
+for (g in target_names) {
+  mean_col <- paste0(g, "_mean_copynum")
+  trust_col <- paste0(g, "_trusted")
+  clean_col <- paste0(g, "_mean_copynum_clean")
+  norm_col <- paste0(g, "_norm")
+
+  merged <- merged %>%
+    mutate(
+      !!clean_col := ifelse(.data[[trust_col]], .data[[mean_col]], NA_real_),
+      !!norm_col  := .data[[clean_col]] / ef1a_mean_copynum)
+}
+
+post_inoc <- merged %>% filter(sampling_day %in% post_inoc_days)
+
+for (g in target_names) {
+  trust_col <- paste0(g, "_trusted")
+  n_na <- sum(!merged[[trust_col]], na.rm = TRUE)
+  cat(g, ":", n_na, "samples set to NA due to off-target melt.\n")
+}
+```
+
+## 5.2 Log Transform
+
+Applies log10 transformation to the normalized abundance values. Because some samples have zero normalized abundance (target not detected), a pseudocount is needed before taking the log. The pseudocount is set to **half the minimum nonzero normalized value** across all target genes — this pushes zeros to a value slightly below the lowest real measurement on the log scale, keeping them distinguishable without distorting the distribution.
+
+Creates `log_{gene}` columns (e.g., `log_dddL`) = `log10(normalized_abundance + pseudocount)`. These log-transformed values are used for the statistical tests in Section 6, since qPCR copy number data is typically right-skewed and log transformation helps stabilize variance.
+
+```{r log-transform}
+# Single pseudocount from the minimum nonzero normalized value across all target genes
+all_norm_vals <- unlist(map(target_names, function(g) {
+  norm_col <- paste0(g, "_norm")
+  vals <- post_inoc[[norm_col]]
+  vals[!is.na(vals) & vals > 0]
+}))
+pseudocount <- min(all_norm_vals) / 2
+
+for (g in target_names) {
+  norm_col <- paste0(g, "_norm")
+  log_col <- paste0("log_", g)
+  post_inoc <- post_inoc %>%
+    mutate(!!log_col := log10(.data[[norm_col]] + pseudocount))
+}
+
+cat("Pseudocount:", format(pseudocount, scientific = TRUE), "\n")
+```
+
+## 5.3 Detection Zone Classification & Below-LOD Censoring
+
+Classifies each sample by detection zone (Above LOQ, LOD–LOQ, Below LOD, Not detected, Melt fail) and sets below-LOD samples to 0. Samples below LOD have copy numbers below the assay's demonstrated detection capability — their values are not meaningful and are treated as non-detected. This must happen before statistical analysis so the stats use the corrected values.
+
+```{r classify-zones-and-censor}
+for (g in target_names) {
+  clean_col <- paste0(g, "_mean_copynum_clean")
+  trust_col <- paste0(g, "_trusted")
+  zone_col <- paste0(g, "_zone")
+  norm_col <- paste0(g, "_norm")
+  log_col <- paste0("log_", g)
+  g_lod <- lod_loq %>% filter(gene == g) %>% pull(lod)
+  g_loq <- lod_loq %>% filter(gene == g) %>% pull(loq)
+
+  post_inoc <- post_inoc %>%
+    mutate(!!zone_col := case_when(
+      !.data[[trust_col]] ~ "Melt fail",
+      is.na(.data[[clean_col]]) | .data[[clean_col]] == 0 ~ "Not detected",
+      .data[[clean_col]] < g_lod ~ "Below LOD",
+      .data[[clean_col]] < g_loq ~ "LOD-LOQ",
+      TRUE ~ "Above LOQ"))
+
+  # Set below-LOD samples to 0 — below the assay's detection capability
+  n_below_lod <- sum(post_inoc[[zone_col]] == "Below LOD", na.rm = TRUE)
+  if (n_below_lod > 0) {
+    post_inoc <- post_inoc %>%
+      mutate(
+        !!clean_col := ifelse(.data[[zone_col]] == "Below LOD", 0, .data[[clean_col]]),
+        !!norm_col  := ifelse(.data[[zone_col]] == "Below LOD", 0, .data[[norm_col]]),
+        !!log_col   := ifelse(.data[[zone_col]] == "Below LOD",
+                              log10(0 + pseudocount), .data[[log_col]]))
+    cat(g, ":", n_below_lod, "below-LOD samples set to 0\n")
+  }
+
+  # Zone summary
+  zone_counts <- post_inoc %>% count(.data[[zone_col]])
+  names(zone_counts)[1] <- "zone"
+  cat(g, "zones:", paste(zone_counts$zone, "=", zone_counts$n, collapse = ", "), "\n")
+}
+```
+
+---
+
+# 6. Statistical Analysis
+
+## 6.1 Kruskal-Wallis Tests
+
+**`kruskal-wallis` chunk:** Runs a Kruskal-Wallis test for each target gene at each timepoint, testing whether the log-transformed normalized abundance differs significantly across treatments. KW is the nonparametric equivalent of one-way ANOVA — appropriate here because qPCR data often violates normality assumptions even after log transformation, and sample sizes per group are small.
+
+Also defines two helper functions used throughout Section 6:
+
+- `p_to_asterisk()` — converts p-values to significance stars (`***` < 0.001, `**` < 0.01, `*` < 0.05)
+- `extract_dunn()` — extracts pairwise comparison results from a `dunn.test` object into a tidy data frame
+
+The output table shows: gene, timepoint, chi-squared statistic, degrees of freedom, p-value, and significance flag. Significant results (p < 0.05) proceed to Dunn's post-hoc tests.
+
+```{r kruskal-wallis}
+p_to_asterisk <- function(p) {
+  case_when(p < 0.001 ~ "***", p < 0.01 ~ "**", p < 0.05 ~ "*", TRUE ~ "")
+}
+
+extract_dunn <- function(dunn_obj, gene, day) {
+  comparisons_split <- strsplit(dunn_obj$comparisons, " - ")
+  data.frame(
+    gene   = gene,
+    day    = day,
+    group1 = sapply(comparisons_split, `[`, 1),
+    group2 = sapply(comparisons_split, `[`, 2),
+    Z      = round(dunn_obj$Z, 2),
+    p.adj  = dunn_obj$P.adjusted,
+    sig    = p_to_asterisk(dunn_obj$P.adjusted))
+}
+
+kw_results <- map_dfr(target_names, function(g) {
+  log_col <- paste0("log_", g)
+  map_dfr(post_inoc_days, function(day) {
+    day_subset <- post_inoc %>%
+      filter(sampling_day == day, !is.na(.data[[log_col]]))
+    if (nrow(day_subset) < 3 || n_distinct(day_subset$treatment) < 2) return(NULL)
+    kw <- kruskal.test(as.formula(paste(log_col, "~ treatment")), data = day_subset)
+    data.frame(gene = g, day = day,
+               chi_sq = round(kw$statistic, 2), df = kw$parameter,
+               p_value = kw$p.value,
+               sig = ifelse(kw$p.value < 0.05, "*", "ns"),
+               stringsAsFactors = FALSE)
+  })
+})
+
+knitr::kable(kw_results %>% mutate(p_value = round(p_value, 4)),
+  col.names = c("Gene", "Timepoint", "Chi-sq", "df", "p-value", "Sig"),
+  caption = "Kruskal-Wallis tests for treatment effect per gene and timepoint")
+```
+
+## 6.2 Dunn's Post-Hoc Tests
+
+For every gene × timepoint combination that was significant in the KW test, runs Dunn's test — a nonparametric pairwise comparison that identifies *which* treatments differ from each other. Uses Benjamini-Hochberg (BH) correction for multiple comparisons.
+
+The full pairwise results are stored in `dunn_table`, but the displayed table filters to **comparisons vs ABS only** — ABS is the key reference group (antibiotic-depleted baseline), so the biologically relevant question is "does inoculation with bacterium X restore/increase abundance relative to the depleted control?"
+
+If no KW tests were significant, this chunk creates an empty `dunn_table` and skips the post-hoc analysis.
+
+```{r dunn-tests}
+sig_combos <- kw_results %>% filter(sig == "*")
+
+if (nrow(sig_combos) > 0) {
+  dunn_table <- map2_dfr(sig_combos$gene, sig_combos$day, function(g, day) {
+    log_col <- paste0("log_", g)
+    day_subset <- post_inoc %>%
+      filter(sampling_day == day, !is.na(.data[[log_col]]))
+    invisible(capture.output(
+      dunn_result <- dunn.test(day_subset[[log_col]], day_subset$treatment, method = "bh")))
+    extract_dunn(dunn_result, g, day)
+  })
+
+  dunn_vs_abs <- dunn_table %>%
+    filter(group1 == "ABS" | group2 == "ABS") %>%
+    mutate(treatment = ifelse(group1 == "ABS", group2, group1)) %>%
+    dplyr::select(gene, day, treatment, p.adj, sig) %>%
+    arrange(gene, day, treatment)
+
+  knitr::kable(dunn_vs_abs %>% mutate(p.adj = round(p.adj, 4)),
+    col.names = c("Gene", "Timepoint", "Treatment", "BH-adj p", "Sig"),
+    caption = "Dunn's post-hoc tests vs ABS")
+} else {
+  dunn_table <- tibble(gene = character(), day = character(), group1 = character(),
+                       group2 = character(), Z = numeric(), p.adj = numeric(),
+                       sig = character())
+  cat("No significant Kruskal-Wallis results — Dunn's post-hoc tests not performed.\n")
+}
+```
+
+Heatmap of Dunn's test significance for each treatment vs ABS, across timepoints, faceted by gene. Tile fill intensity = `-log10(adjusted p-value)` (darker red = more significant). Tiles are labeled with significance stars or "ns". This is the summary visualization for the statistical analysis — it shows at a glance which inoculation treatments led to significantly higher/lower target gene abundance compared to the depleted baseline, and at which timepoints.
+
+```{r dunn-heatmap, fig.width=12, fig.height=5, results='asis'}
+heatmap_treatments <- setdiff(treatment_levels, c("FASW", "ABS"))
+complete_grid <- expand.grid(
+  gene = target_names,
+  day = post_inoc_days,
+  treatment = heatmap_treatments,
+  stringsAsFactors = FALSE)
+
+if (nrow(dunn_table) > 0) {
+  dunn_vs_abs_heatmap <- dunn_table %>%
+    filter(group1 == "ABS" | group2 == "ABS") %>%
+    mutate(treatment = ifelse(group1 == "ABS", group2, group1)) %>%
+    dplyr::select(gene, day, treatment, p.adj, sig)
+} else {
+  dunn_vs_abs_heatmap <- tibble(gene = character(), day = character(),
+                                treatment = character(), p.adj = numeric(),
+                                sig = character())
+}
+
+dunn_heatmap_data <- complete_grid %>%
+  left_join(dunn_vs_abs_heatmap, by = c("gene", "day", "treatment")) %>%
+  mutate(
+    p.adj = ifelse(is.na(p.adj), 1, p.adj),
+    sig = ifelse(is.na(sig), "", sig),
+    neg_log10_p = -log10(pmax(p.adj, 1e-10)),
+    sig_label = ifelse(sig == "", "ns", sig),
+    day = factor(day, levels = post_inoc_days),
+    gene_label = paste0(gene, " (", sapply(target_genes, `[[`, "organism")[gene], ")"))
+
+print(
+  ggplot(dunn_heatmap_data, aes(x = day, y = treatment, fill = neg_log10_p)) +
+    geom_tile(color = "white", linewidth = 0.5) +
+    geom_text(aes(label = sig_label), size = 4) +
+    facet_wrap(~ gene_label) +
+    scale_fill_gradient(low = "grey95", high = "#D73027", name = "-log10(p.adj)") +
+    labs(x = "Days Post-Inoculation", y = "Treatment",
+         title = "Dunn's Test vs ABS — Significance Heatmap") +
+    theme_minimal(base_size = 13) +
+    theme(panel.grid = element_blank()))
+```
+
+
+---
+
+# 7. Visualization
+
+## 7.1 Normalized Abundance Over Time
+
+The main results figure — one line plot per target gene showing mean normalized abundance (target/ef1a) over time, with separate colored lines per treatment. Error bars are ± standard error.
+
+Significance annotations (stars) are overlaid at timepoints where a treatment differed significantly from ABS (from the Dunn's tests). Stars are vertically stacked above the data when multiple treatments are significant at the same timepoint, with spacing calculated from the y-axis range.
+
+Key plot features:
+
+- Y-axis starts near zero with 25% expansion at the top for annotation space
+- Treatment colors match the global palette defined in Section 1.2
+- Caption documents what the asterisks mean
+
+Plots are stored in `line_plots` list for saving to file in Section 8.
+
+```{r line-plots, fig.width=14, fig.height=6, results='asis'}
+line_plots <- list()
+
+for (g in target_names) {
+  norm_col <- paste0(g, "_norm")
+  g_label <- paste0(g, " (", target_genes[[g]]$organism, ")")
+
+  line_summary <- post_inoc %>%
+    filter(!is.na(.data[[norm_col]])) %>%
+    group_by(treatment, sampling_day) %>%
+    summarise(
+      mean_val = mean(.data[[norm_col]], na.rm = TRUE),
+      se_val = sd(.data[[norm_col]], na.rm = TRUE) / sqrt(n()),
+      n = n(),
+      .groups = "drop")
+
+  y_range <- max(line_summary$mean_val + line_summary$se_val, na.rm = TRUE)
+
+  timepoint_max <- line_summary %>%
+    group_by(sampling_day) %>%
+    summarise(tp_max = max(mean_val + se_val, na.rm = TRUE), .groups = "drop")
+
+  # Significance annotations
+  g_dunn <- dunn_table %>% filter(gene == g)
+  if (nrow(g_dunn) > 0) {
+    sig_annotations <- g_dunn %>%
+      filter((group1 == "ABS" | group2 == "ABS") & sig != "") %>%
+      mutate(
+        treatment = ifelse(group1 == "ABS", group2, group1),
+        sampling_day = factor(day, levels = post_inoc_days)) %>%
+      left_join(timepoint_max, by = "sampling_day") %>%
+      group_by(sampling_day) %>%
+      mutate(sig_rank = row_number()) %>%
+      ungroup() %>%
+      mutate(sig_y = tp_max + y_range * 0.03 + (sig_rank - 1) * y_range * 0.05)
+  } else {
+    sig_annotations <- tibble()
+  }
+
+  p <- ggplot(line_summary,
+         aes(x = sampling_day, y = mean_val, color = treatment, group = treatment)) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 2.5) +
+    geom_errorbar(aes(ymin = pmax(mean_val - se_val, 0), ymax = mean_val + se_val),
+                  width = 0.2, linewidth = 0.5) +
+    {if (nrow(sig_annotations) > 0) geom_text(data = sig_annotations,
+              aes(label = sig, y = sig_y),
+              size = 7, fontface = "bold", show.legend = FALSE)} +
+    scale_color_manual(values = palette, drop = FALSE) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.10))) +
+    labs(x = "Days Post-Inoculation",
+         y = paste0(g, " / Ef1a (normalized abundance)"),
+         color = "Treatment",
+         title = paste0(g_label, " Normalized Abundance Over Time"),
+         caption = "Asterisks = significant vs ABS (Dunn's, BH-adjusted p < 0.05). Error bars = ± SE.") +
+    theme_bw(base_size = 14) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "top",
+          plot.caption = element_text(size = 10, hjust = 0))
+
+  print(p)
+  line_plots[[g]] <- p
+  cat("\n\n")
+}
+```
+
+## 7.2 Abundance Heatmaps
+
+Tile heatmap for each target gene showing mean normalized abundance (target/ef1a) by treatment × timepoint. Each tile is labeled with the numeric value. Color scale is diverging (blue–yellow–red) centered on the median, making it easy to spot which treatment × timepoint combinations have unusually high or low abundance relative to the dataset. Stored in `heatmap_plots` for export.
+
+```{r heatmaps, fig.width=10, fig.height=5, results='asis'}
+heatmap_plots <- list()
+
+for (g in target_names) {
+  norm_col <- paste0(g, "_norm")
+  g_label <- paste0(g, " (", target_genes[[g]]$organism, ")")
+
+  heatmap_data <- post_inoc %>%
+    filter(!is.na(.data[[norm_col]])) %>%
+    group_by(treatment, sampling_day) %>%
+    summarise(mean_norm = mean(.data[[norm_col]], na.rm = TRUE), n = n(), .groups = "drop")
+
+  complete_grid <- expand.grid(
+    treatment = levels(post_inoc$treatment),
+    sampling_day = post_inoc_days,
+    stringsAsFactors = FALSE) %>%
+    mutate(treatment = factor(treatment, levels = levels(post_inoc$treatment)),
+           sampling_day = factor(sampling_day, levels = post_inoc_days))
+
+  heatmap_data <- complete_grid %>%
+    left_join(heatmap_data, by = c("treatment", "sampling_day")) %>%
+    mutate(label = ifelse(is.na(mean_norm), "ND", round(mean_norm, 4)))
+
+  p <- ggplot(heatmap_data, aes(x = sampling_day, y = treatment, fill = mean_norm)) +
+    geom_tile(color = "white", linewidth = 0.5) +
+    geom_text(aes(label = label), size = 3) +
+    scale_fill_gradient2(low = "#2166AC", mid = "lightyellow", high = "#D73027",
+                         midpoint = median(heatmap_data$mean_norm, na.rm = TRUE),
+                         na.value = "grey90",
+                         name = "Mean norm.\nabundance") +
+    labs(x = "Days Post-Inoculation", y = "Treatment",
+         title = paste0(g_label, " Mean Normalized Abundance (target/ef1a)")) +
+    theme_minimal(base_size = 13) +
+    theme(panel.grid = element_blank())
+
+  print(p)
+  heatmap_plots[[g]] <- p
+  cat("\n\n")
+}
+```
+
+## 7.3 Detection Zone Visualization
+
+Zone classification and below-LOD censoring were performed in Section 5.3. This section visualizes the detection zones computed earlier. Note: "Below LOD" samples were set to 0 prior to statistical analysis and will appear in the "Not detected" category in the data, but retain their original zone label for this visualization.
+
+```{r detection-zone-plots, fig.width=12, fig.height=5, results='asis'}
+for (g in target_names) {
+  zone_col <- paste0(g, "_zone")
+  g_label <- paste0(g, " (", target_genes[[g]]$organism, ")")
+  g_lod <- lod_loq %>% filter(gene == g) %>% pull(lod)
+  g_loq <- lod_loq %>% filter(gene == g) %>% pull(loq)
+
+  # Detection rate heatmap
+  det_data <- post_inoc %>%
+    mutate(detected = .data[[zone_col]] != "Not detected" & .data[[zone_col]] != "Melt fail") %>%
+    group_by(treatment, sampling_day) %>%
+    summarise(n_total = n(), n_detected = sum(detected, na.rm = TRUE),
+              pct_detected = n_detected / n_total, .groups = "drop") %>%
+    mutate(sampling_day = factor(sampling_day, levels = post_inoc_days))
+
+  print(
+    ggplot(det_data, aes(x = sampling_day, y = treatment, fill = pct_detected)) +
+      geom_tile(color = "white", linewidth = 0.5) +
+      geom_text(aes(label = paste0(n_detected, "/", n_total)), size = 3.5) +
+      scale_fill_gradient(low = "white", high = "#2166AC",
+                          limits = c(0, 1), labels = percent_format(),
+                          name = "Detection\nrate") +
+      labs(x = "Days Post-Inoculation", y = "Treatment",
+           title = paste0(g_label, " Detection Rate by Treatment and Timepoint")) +
+      theme_minimal(base_size = 13) +
+      theme(panel.grid = element_blank()))
+  cat("\n\n")
+
+  # Stacked zone bar chart
+  zone_data <- post_inoc %>%
+    mutate(zone = factor(.data[[zone_col]],
+      levels = c("Above LOQ", "LOD-LOQ", "Below LOD", "Not detected", "Melt fail")),
+      sampling_day = factor(sampling_day, levels = post_inoc_days))
+
+  print(
+    ggplot(zone_data, aes(x = sampling_day, fill = zone)) +
+      geom_bar(position = "fill") +
+      facet_wrap(~ treatment, nrow = 1) +
+      scale_fill_manual(values = c("Above LOQ" = "#2166AC", "LOD-LOQ" = "#92C5DE",
+                                    "Below LOD" = "#FDDBC7", "Not detected" = "grey85",
+                                    "Melt fail" = "#E41A1C"),
+                        name = "Detection zone") +
+      scale_y_continuous(labels = percent_format()) +
+      labs(x = "Days Post-Inoculation", y = "Proportion of samples",
+           title = paste0(g_label, " Detection Zones Relative to LOD/LOQ"),
+           subtitle = paste0("LOD = ", round(g_lod, 1),
+                             " copies/rxn | LOQ = ", round(g_loq, 1), " copies/rxn")) +
+      theme_bw(base_size = 11) +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 7),
+            legend.position = "top"))
+  cat("\n\n")
+
+  # Zone summary table
+  zone_summary <- post_inoc %>%
+    count(.data[[zone_col]]) %>%
+    mutate(pct = round(100 * n / sum(n), 1))
+  names(zone_summary)[1] <- "Detection Zone"
+
+  print(knitr::kable(zone_summary,
+    col.names = c("Detection Zone", "n Samples", "% of Total"),
+    caption = paste0(g, " sample counts by detection zone")))
+  cat("\n\n")
+}
+```
+
+---
+
+# 8. Save Outputs & Session Info
+
+**`save-outputs` chunk:** Exports all key results:
+
+- **PDF + PNG** of each target gene's line plot and heatmap (to `../results/`)
+- **CSV files**: LOD/LOQ table, Kruskal-Wallis results, and full Dunn's pairwise results
+
+PDFs are vector format for publication/editing in Affinity; PNGs are raster for presentations/quick viewing.
+
+```{r save-outputs}
+for (g in target_names) {
+  if (!is.null(line_plots[[g]])) {
+    ggsave(paste0(results_dir, g, "_line_plot.pdf"), line_plots[[g]], width = 10, height = 6, bg = "white")
+    ggsave(paste0(results_dir, g, "_line_plot.png"), line_plots[[g]], width = 10, height = 6, dpi = 300, bg = "white")
+  }
+  if (!is.null(heatmap_plots[[g]])) {
+    ggsave(paste0(results_dir, g, "_heatmap.pdf"), heatmap_plots[[g]], width = 10, height = 5, bg = "white")
+    ggsave(paste0(results_dir, g, "_heatmap.png"), heatmap_plots[[g]], width = 10, height = 5, dpi = 300, bg = "white")
+  }
+}
+
+write.csv(lod_loq, paste0(results_dir, "lod_loq.csv"), row.names = FALSE)
+write.csv(kw_results, paste0(results_dir, "kruskal_results.csv"), row.names = FALSE)
+write.csv(dunn_table, paste0(results_dir, "dunn_results.csv"), row.names = FALSE)
+if (exists("sensitivity_comparison")) {
+  write.csv(sensitivity_comparison, paste0(results_dir, "sensitivity_loq.csv"), row.names = FALSE)
+}
+```
+
+**This analysis pipeline was generated with the assistance of Claude AI (Opus 4.6) and edited for accuracy and reliability by Hailey Hatch-West.**
+
+```{r session-info}
+sessionInfo()
+```

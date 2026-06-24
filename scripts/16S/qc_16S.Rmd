@@ -49,8 +49,8 @@ chimera detection notes: When including the mock community samples which are ric
 ## Read in data
 
 ```{r}
-ps<-readRDS('../data/16S/ps.withTree.rds')
-df.meta<-read.csv('../data/16S/metadata.csv')
+ps<-readRDS('../../data/16S/ps.withTree.rds')
+df.meta<-read.csv('../../data/16S/metadata.csv')
 ps
 head(df.meta); dim(df.meta)
 ```
