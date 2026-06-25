@@ -529,8 +529,6 @@ cat("Symbiont:", nrow(annot_sym), "genes,",
 
 Host differential expression analysis using DESeq2. DESeq2 models RNA-seq count data using a negative binomial distribution, accounts for library size differences between samples, and uses shrinkage to produce more reliable fold-change estimates.
 
-Might be a better choice for RNA-seq data as it is well ground truthed in the field
-
 ## 8.1 Create DESeq Object and Filter Low-Count Genes
 
 ```{r deseq-aip-setup}
@@ -576,9 +574,11 @@ p <- ggplot(pca_data, aes(x = PC1, y = PC2, color = treatment, shape = timepoint
        y = paste0("PC2: ", percent_var[2], "% variance"),
        title = "PCA — Aiptasia")
 p
-ggsave("pca_host_all.pdf", p, width = 7, height = 5)
+ggsave(file.path(path.out,"pca_host_all.pdf"), p, width = 7, height = 5)
 # Timepoint is the dominant source of variation, although controls at 1dpi cluster with all 21dpi, suggesting variation largely due to ABS influence
 ```
+impacts of the antibiotics is negligable at day 21
+
 
 ### PCA — Per Timepoint
 
@@ -596,7 +596,7 @@ p <- ggplot(pca_data, aes(x = PC1, y = PC2, color = treatment)) +
        y = paste0("PC2: ", percent_var[2], "% variance"),
        title = "PCA — Host expression at 1dpi")
 p
-ggsave("../results/pca_host_1dpi.pdf", p, width = 6, height = 5)
+ggsave(file.path(path.out,"pca_host_1dpi.pdf"), p, width = 6, height = 5)
 # Control separates from all others — antibiotic effect dominates at 1dpi
 ```
 
