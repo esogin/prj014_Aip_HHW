@@ -376,7 +376,7 @@ nrow(counts_aip) + nrow(counts_sym) + nrow(counts_lab) + nrow(counts_rue) + nrow
 ```
 
 Gene filtering
-- Below calculate the Nr of genes passing the filter, a gene is included in the filter if it has at least 10 reads in 4 samples across the entire dataset (Ref: )(@Hailey - can you include a reference here for this decision)
+- Below calculate the Nr of genes passing the filter, a gene is included in the filter if it has at least 10 reads in 4 samples across the entire dataset (Ref: deseq manual )
 
 ```{r organism-summary-stats}
 organism_list <- list(
@@ -429,7 +429,7 @@ aip_annotate <- aip_annotate %>%
 
 # Step 4: Select key columns for the final annotation table: gene_id, protein_name, BLAST description, GO terms, KEGG_ID
 aip_annotate <- aip_annotate %>%
-  select(gene_id, protein_name, Protein_ID,
+  dplyr::select(gene_id, protein_name, Protein_ID,
          starts_with("Hit_description"),
          starts_with("GO_"),
          KEGG_ID)
@@ -580,6 +580,63 @@ ggsave(file.path(path.out,"pca_host_all.pdf"), p, width = 7, height = 5)
 impacts of the antibiotics is negligable at day 21
 
 
+```{r PERMANOVA}
+# get VST matrix (samples as rows)
+vst_mat <- t(assay(vsd_aip))
+
+# pull metadata
+meta <- as.data.frame(colData(vsd_aip))
+
+# run PERMANOVA
+perm_res <- adonis2(vst_mat ~ treatment+timepoint+ treatment:timepoint,
+                    data = meta,
+                    method = "euclidean",
+                    permutations = 999,
+                    by="terms")
+perm_res
+
+```
+Significant effect of time but not treatment on expression profiles
+Suggests that expression differences are related to ABS exposure and not to microbial inoculations. 
+
+### PCA - Run at 1dpi without FASW samples
+
+```{r pca-aip-1dpi-no-fasw}
+vsd_aip_1dpi_noFASW <- vsd_aip[, vsd_aip$timepoint == "1dpi" & !vsd_aip$treatment=='FASW']
+
+pca_data <- plotPCA(vsd_aip_1dpi_noFASW, intgroup = c("treatment"), returnData = TRUE)
+percent_var <- round(100 * attr(pca_data, "percentVar"))
+
+p <- ggplot(pca_data, aes(x = PC1, y = PC2, color = treatment)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = palette) +
+  theme_bw() +
+  labs(x = paste0("PC1: ", percent_var[1], "% variance"),
+       y = paste0("PC2: ", percent_var[2], "% variance"),
+       title = "PCA — Host expression at 1dpi, no FASW")
+p
+ggsave(file.path(path.out,"pca_host_1dpi_noFASW.pdf"), p, width = 6, height = 5)
+```
+
+```{r PERMANOVA}
+# get VST matrix (samples as rows)
+vst_mat <- t(assay(vsd_aip_1dpi_noFASW))
+
+# pull metadata
+meta <- as.data.frame(colData(vsd_aip_1dpi_noFASW))
+
+# run PERMANOVA
+perm_res <- adonis2(vst_mat ~ treatment,
+                    data = meta,
+                    method = "euclidean",
+                    permutations = 999,
+                    by="terms")
+perm_res
+
+```
+While it looks like there is some seperation, this isn't signficant across treatments in teh PCA analysis of all genes
+
+
 ### PCA — Per Timepoint
 
 ```{r pca-aip-1dpi}
@@ -599,6 +656,23 @@ p
 ggsave(file.path(path.out,"pca_host_1dpi.pdf"), p, width = 6, height = 5)
 # Control separates from all others — antibiotic effect dominates at 1dpi
 ```
+```{r}
+# get VST matrix (samples as rows)
+vst_mat <- t(assay(vsd_aip_1dpi))
+
+# pull metadata
+meta <- as.data.frame(colData(vsd_aip_1dpi))
+
+# run PERMANOVA
+perm_res_aip_1dpi <- adonis2(vst_mat ~ treatment:timepoint,
+                    data = meta,
+                    method = "euclidean",
+                    permutations = 999)
+perm_res_aip_1dpi
+```
+
+no effect of treatment 
+
 
 ```{r pca-aip-21dpi}
 vsd_aip_21dpi <- vsd_aip[, vsd_aip$timepoint == "21dpi"]
@@ -614,15 +688,23 @@ p <- ggplot(pca_data, aes(x = PC1, y = PC2, color = treatment)) +
        y = paste0("PC2: ", percent_var[2], "% variance"),
        title = "PCA — Host expression at 21dpi")
 p
-ggsave("../results/pca_host_21dpi.pdf", p, width = 6, height = 5)
+ggsave(file.path(path.out,"pca_host_21dpi.pdf"), p, width = 6, height = 5)
 # More dispersed at 21dpi — increased variability over time
 ```
 
 ## 8.4 Differential Expression by Timepoint
 
+Likely need to modify analysis based on here - https://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#countmat
+
+
+
 ABS is the reference because bacteria were inoculated into antibiotic knocked down animals so the fair comparison is each inoculum versus the antibiotic baseline.
 
 ### 1dpi Contrasts
+select only 1 dpi 
+@hailey - should the data be subsetted to each contrast before running DESeq? or is this the right way to do this? I also wonder if we should subset out the FASW samples since we don't really care about those for the analysis
+
+I think it might be best to leave it all in and just separate out at timepoints
 
 ```{r deseq-aip-1dpi}
 dds_aip_1dpi <- dds_aip[, dds_aip$timepoint == "1dpi"]
@@ -686,16 +768,43 @@ deg_summary_aip <- bind_rows(
   summarize_degs(res_aip_21dpi_ISOABC) %>% mutate(timepoint = "21dpi", contrast = "multi_vs_ABS")
 )
 
-deg_summary_aip <- deg_summary_aip %>% select(timepoint, contrast, up, down, total)
+deg_summary_aip <- deg_summary_aip %>% dplyr::select(timepoint, contrast, up, down, total)
 deg_summary_aip
 
 # Bacterial influence on host expression is acute (stronger at 1dpi and fades by 21dpi). ABS treatment creates a huge host response, both up and down regulating genes. 
 ```
+```{r}
+deg_summary_aip %>%
+  pivot_longer(cols = c(up, down), names_to = "direction", values_to = "count") %>%
+  mutate(
+    count = ifelse(direction == "down", -count, count),
+    direction = factor(direction, levels = c("up", "down")),
+    contrast = factor(contrast, levels = c("FASW_vs_ABS", "Labrenzia_vs_ABS", 
+                                            "Ruegeria_vs_ABS", "Vibrio_vs_ABS", "multi_vs_ABS"))
+  ) %>%
+  ggplot(aes(x = contrast, y = count, fill = direction)) +
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept = 0, linewidth = 0.4) +
+  facet_wrap(~ timepoint) +
+  scale_fill_manual(values = c("up" = "#d73027", "down" = "#4575b4"),
+                    labels = c("up" = "Upregulated", "down" = "Downregulated")) +
+  scale_y_continuous(labels = abs) +
+  scale_x_discrete(labels = c("FASW_vs_ABS" = "FASW", "Labrenzia_vs_ABS" = "Labrenzia",
+                               "Ruegeria_vs_ABS" = "Ruegeria", "Vibrio_vs_ABS" = "Vibrio",
+                               "multi_vs_ABS" = "multi")) +
+  labs(x = "Contrast (vs ABS)", y = "Number of DEGs", fill = NULL,
+       title = "Differentially expressed genes — Aiptasia host") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(file.path(path.out,"nr_DE_genes.pdf"), width = 6, height = 5)
+```
 
-## Annotate and Export DEG Tables
 
-```{r export-degs-aip}
-export_degs <- function(res, annotation, filename) {
+
+### Annotate and Export DEG Tables
+
+```{r}
+export_degs <- function(res, annotation, filename, timepoint, contrast) {
   df <- as.data.frame(res) %>%
     rownames_to_column("gene_id")
   
@@ -703,9 +812,8 @@ export_degs <- function(res, annotation, filename) {
     filter(padj < 0.05)
   
   df_annotated <- df_sig %>%
-    left_join(annotation, by = "gene_id")
-  
-  df_annotated <- df_annotated %>%
+    left_join(annotation, by = "gene_id") %>%
+    mutate(timepoint = timepoint, contrast = contrast) %>%
     arrange(padj)
   
   write.csv(df_annotated, file = filename, row.names = FALSE)
@@ -713,22 +821,34 @@ export_degs <- function(res, annotation, filename) {
   return(df_annotated)
 }
 
-deg_aip_1dpi_control <- export_degs(res_aip_1dpi_control, aip_annotate, "../results/DEG_1dpi_control_vs_ABS.csv")
-deg_aip_1dpi_ISOA    <- export_degs(res_aip_1dpi_ISOA, aip_annotate, "../results/DEG_1dpi_ISOA_vs_ABS.csv")
-deg_aip_1dpi_ISOB    <- export_degs(res_aip_1dpi_ISOB, aip_annotate, "../results/DEG_1dpi_ISOB_vs_ABS.csv")
-deg_aip_1dpi_ISOC    <- export_degs(res_aip_1dpi_ISOC, aip_annotate, "../results/DEG_1dpi_ISOC_vs_ABS.csv")
-deg_aip_1dpi_ISOABC  <- export_degs(res_aip_1dpi_ISOABC, aip_annotate, "../results/DEG_1dpi_ISOABC_vs_ABS.csv")
+deg_aip_1dpi_control <- export_degs(res_aip_1dpi_control, aip_annotate, file.path(path.out,"DEG_1dpi_control_vs_ABS.csv"), "1dpi", "FASW_vs_ABS")
+deg_aip_1dpi_ISOA    <- export_degs(res_aip_1dpi_ISOA,    aip_annotate, file.path(path.out,"DEG_1dpi_ISOA_vs_ABS.csv"),    "1dpi", "Labrenzia_vs_ABS")
+deg_aip_1dpi_ISOB    <- export_degs(res_aip_1dpi_ISOB,    aip_annotate, file.path(path.out,"DEG_1dpi_ISOB_vs_ABS.csv"),    "1dpi", "Ruegeria_vs_ABS")
+deg_aip_1dpi_ISOC    <- export_degs(res_aip_1dpi_ISOC,    aip_annotate, file.path(path.out,"DEG_1dpi_ISOC_vs_ABS.csv"),    "1dpi", "Vibrio_vs_ABS")
+deg_aip_1dpi_ISOABC  <- export_degs(res_aip_1dpi_ISOABC,  aip_annotate, file.path(path.out,"DEG_1dpi_ISOABC_vs_ABS.csv"),  "1dpi", "multi_vs_ABS")
 
-deg_aip_21dpi_control <- export_degs(res_aip_21dpi_control, aip_annotate, "../results/DEG_21dpi_control_vs_ABS.csv")
-deg_aip_21dpi_ISOA    <- export_degs(res_aip_21dpi_ISOA, aip_annotate, "../results/DEG_21dpi_ISOA_vs_ABS.csv")
-deg_aip_21dpi_ISOB    <- export_degs(res_aip_21dpi_ISOB, aip_annotate, "../results/DEG_21dpi_ISOB_vs_ABS.csv")
-deg_aip_21dpi_ISOC    <- export_degs(res_aip_21dpi_ISOC, aip_annotate, "../results/DEG_21dpi_ISOC_vs_ABS.csv")
-deg_aip_21dpi_ISOABC  <- export_degs(res_aip_21dpi_ISOABC, aip_annotate, "../results/DEG_21dpi_ISOABC_vs_ABS.csv")
+deg_aip_21dpi_control <- export_degs(res_aip_21dpi_control, aip_annotate, file.path(path.out,"DEG_21dpi_control_vs_ABS.csv"), "21dpi", "FASW_vs_ABS")
+deg_aip_21dpi_ISOA    <- export_degs(res_aip_21dpi_ISOA,    aip_annotate, file.path(path.out,"DEG_21dpi_ISOA_vs_ABS.csv"),    "21dpi", "Labrenzia_vs_ABS")
+deg_aip_21dpi_ISOB    <- export_degs(res_aip_21dpi_ISOB,    aip_annotate, file.path(path.out,"DEG_21dpi_ISOB_vs_ABS.csv"),    "21dpi", "Ruegeria_vs_ABS")
+deg_aip_21dpi_ISOC    <- export_degs(res_aip_21dpi_ISOC,    aip_annotate, file.path(path.out,"DEG_21dpi_ISOC_vs_ABS.csv"),    "21dpi", "Vibrio_vs_ABS")
+deg_aip_21dpi_ISOABC  <- export_degs(res_aip_21dpi_ISOABC,  aip_annotate, file.path(path.out,"DEG_21dpi_ISOABC_vs_ABS.csv"),  "21dpi", "multi_vs_ABS")
 
-saveRDS(dds_aip, "../results/dds_aip.rds")
-saveRDS(dds_aip_1dpi, "../results/dds_aip_1dpi.rds")
-saveRDS(dds_aip_21dpi, "../results/dds_aip_21dpi.rds")
+# combined table
+all_degs_aip <- bind_rows(
+  deg_aip_1dpi_control, deg_aip_1dpi_ISOA, deg_aip_1dpi_ISOB, deg_aip_1dpi_ISOC, deg_aip_1dpi_ISOABC,
+  deg_aip_21dpi_control, deg_aip_21dpi_ISOA, deg_aip_21dpi_ISOB, deg_aip_21dpi_ISOC, deg_aip_21dpi_ISOABC
+) %>%
+  dplyr::select(timepoint, contrast, gene_id, everything())
+
+write.csv(all_degs_aip, file.path(path.out, "DEG_all_aip.csv"), row.names = FALSE)
+
+
+saveRDS(dds_aip, file.path(path.out,"dds_aip.rds"))
+saveRDS(dds_aip_1dpi, file.path(path.out,"dds_aip_1dpi.rds"))
+saveRDS(dds_aip_21dpi, file.path(path.out,"dds_aip_21dpi.rds"))
 ```
+
+
 
 ## 8.5 Differential Expression by Timepoint Within Treatment
 
@@ -766,18 +886,40 @@ timepoint_contrasts <- list(
 deg_summary_timepoint <- map_dfr(names(timepoint_contrasts), function(trt) {
   summarize_degs(timepoint_contrasts[[trt]]) %>%
     mutate(treatment = trt, contrast = "21dpi_vs_1dpi")
-}) %>% select(treatment, contrast, up, down, total)
+}) %>% dplyr::select(treatment, contrast, up, down, total)
 
 deg_summary_timepoint
 # Positive = upregulated at 21dpi; treatment-specific temporal trajectories
 ```
-
 ```{r export-deseq-aip-timepoint}
 for (trt in names(timepoint_contrasts)) {
   export_degs(timepoint_contrasts[[trt]], aip_annotate,
-              paste0("../results/DEG_timepoint_21vs1dpi_", trt, ".csv"))
+              paste0(path.out,"DEG_timepoint_21vs1dpi_", trt, ".csv"))
 }
 ```
+
+```{r}
+deg_summary_timepoint %>%
+  pivot_longer(cols = c(up, down), names_to = "direction", values_to = "count") %>%
+  mutate(
+    count = ifelse(direction == "down", -count, count),
+    direction = factor(direction, levels = c("up", "down")),
+    treatment = factor(treatment, levels = c("FASW", "ABS", "Labrenzia", "Ruegeria", "Vibrio", "multi"))
+  ) %>%
+  ggplot(aes(x = treatment, y = count, fill = treatment, alpha = direction)) +
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept = 0, linewidth = 0.4) +
+  scale_fill_manual(values = palette) +
+  scale_alpha_manual(values = c("up" = 1, "down" = 0.5),
+                     labels = c("up" = "Up at 21dpi", "down" = "Down at 21dpi")) +
+  scale_y_continuous(labels = abs) +
+  labs(x = NULL, y = "Number of DEGs", fill = "Treatment", alpha = "Direction",
+       title = "Temporal DEGs per treatment (21dpi vs 1dpi)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave(file.path(path.out,"nr_DE_genes_withintrt_between_timepoints.pdf"), width = 6, height = 5)
+```
+
 
 ## 8.6 Volcano Plot Helper + Downregulated Gene Lists
 
@@ -835,14 +977,14 @@ down_genes_all <- map_dfr(names(all_host_contrasts_vol), function(cn) {
     filter(!is.na(padj), padj < 0.05, log2FoldChange < -1) %>%
     arrange(log2FoldChange) %>%
     left_join(aip_annotate %>%
-                select(gene_id, protein_name,
+                dplyr::select(gene_id, protein_name,
                        any_of(c("Hit_description..SwissProt.",
                                 "Hit_description..TrEMBL.",
                                 "KEGG_ID")),
                        starts_with("GO_IDs")),
               by = "gene_id") %>%
     mutate(contrast = cn) %>%
-    select(contrast, gene_id, protein_name, log2FoldChange, padj, everything())
+    dplyr::select(contrast, gene_id, protein_name, log2FoldChange, padj, everything())
 })
 
 down_genes_all %>% dplyr::count(contrast, name = "n_downregulated") %>% print()
