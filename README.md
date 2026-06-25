@@ -16,25 +16,25 @@ This project investigates how bacterial inoculation affects host gene expression
 
 ---
 
+
 ## Repository structure
 
-> **Note:** `data/`, `output/`, and `figures/` directories are not tracked in git.
-scripts/
-├── 16S/
-│ ├── dada2.r # DADA2 amplicon pipeline (PacBio long-read 16S; error model learned on mock community)
-│ ├── qc_16S.Rmd # Phyloseq QC, decontamination, and object processing
-│ └── statistical_analysis_16S.Rmd # Alpha/beta diversity, differential abundance (ALDEx2), visualizations
-├── qPCR/
-│ └── qPCR_analysis.Rmd # qPCR copy-number analysis, normalized to Ef1a housekeeping gene
-└── transcriptomics/
-├── fastqc.sh # FastQC + SortMeRNA (rRNA removal) — SLURM HPC
-├── fastp.sh # Quality trimming with fastp — SLURM HPC
-├── check_strandedness.sh # Strandedness check prior to alignment — SLURM HPC
-├── hisat2_index.sh # Build HISAT2 index for combined reference — SLURM HPC
-├── hisat2_split.sh # Align reads to combined reference genome — SLURM HPC
-├── merge_hisat2_logs.sh # Summarize alignment statistics across samples — SLURM HPC
-├── featurecounts_v2.sh # Gene-level quantification with featureCounts — SLURM HPC
-└── prj014_transcriptomics_analysis.Rmd # Differential expression (DESeq2), PCA, heatmaps, gene-set analysis
+    scripts/
+    ├── 16S/
+    │   ├── dada2.r                        # DADA2 amplicon pipeline (PacBio long-read 16S; error model learned on mock community)
+    │   ├── qc_16S.Rmd                     # Phyloseq QC, decontamination, and object processing
+    │   └── statistical_analysis_16S.Rmd   # Alpha/beta diversity, differential abundance (ALDEx2), visualizations
+    ├── qPCR/
+    │   └── qPCR_analysis.Rmd              # qPCR copy-number analysis, normalized to Ef1a housekeeping gene
+    └── transcriptomics/
+        ├── fastqc.sh                       # FastQC + SortMeRNA (rRNA removal) — SLURM HPC
+        ├── fastp.sh                        # Quality trimming with fastp — SLURM HPC
+        ├── check_strandedness.sh           # Strandedness check prior to alignment — SLURM HPC
+        ├── hisat2_index.sh                 # Build HISAT2 index for combined reference — SLURM HPC
+        ├── hisat2_split.sh                 # Align reads to combined reference genome — SLURM HPC
+        ├── merge_hisat2_logs.sh            # Summarize alignment statistics across samples — SLURM HPC
+        ├── featurecounts_v2.sh             # Gene-level quantification with featureCounts — SLURM HPC
+        └── prj014_transcriptomics_analysis.Rmd  # Differential expression (DESeq2), PCA, heatmaps, gene-set analysis
 ---
 
 ## Bioinformatics pipelines
