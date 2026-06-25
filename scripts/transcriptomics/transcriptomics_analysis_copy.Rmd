@@ -1,6 +1,6 @@
 ---
-title: "prj014: Metatranscriptomic Analysis of Bacterial Inoculation in Aiptasia"
-author: "Hailey Hatch"
+title: "Metatranscriptomic Analysis of Bacterial Inoculation in Aiptasia"
+author: "Hailey Hatch & Maggie Sogin"
 date: "`r Sys.Date()`"
 output:
   html_document:
@@ -375,6 +375,9 @@ counts_vib <- counts_matrix[startsWith(rownames(counts_matrix), "vib_"), ]
 nrow(counts_aip) + nrow(counts_sym) + nrow(counts_lab) + nrow(counts_rue) + nrow(counts_vib) == nrow(counts_matrix)
 ```
 
+Gene filtering
+- Below calculate the Nr of genes passing the filter, a gene is included in the filter if it has at least 10 reads in 4 samples across the entire dataset (Ref: )(@Hailey - can you include a reference here for this decision)
+
 ```{r organism-summary-stats}
 organism_list <- list(
   aip = counts_aip, sym = counts_sym,
@@ -383,9 +386,9 @@ organism_list <- list(
 organism_summary <- data.frame(
   organism = names(organism_list),
   total_genes = sapply(organism_list, nrow),
-  median_counts_per_sample = sapply(organism_list, function(x) median(colSums(x))),
-  genes_all_zero = sapply(organism_list, function(x) sum(rowSums(x) == 0)),
-  genes_passing_filter = sapply(organism_list, function(x) sum(rowSums(x >= 10) >= 4))
+  median_counts_per_sample = sapply(organism_list, function(x) median(colSums(x))), #median nr. reads mapping to each sample
+  genes_all_zero = sapply(organism_list, function(x) sum(rowSums(x) == 0)), #nr genes no expression data at all 
+  genes_passing_filter = sapply(organism_list, function(x) sum(rowSums(x >= 10) >= 4)) # at least 10 counts in 4 samps
 )
 organism_summary
 # Few bacterial genes passed the filter
@@ -394,7 +397,7 @@ organism_summary
 ```{r save-organism-counts}
 for (name in names(organism_list)) {
   write.table(organism_list[[name]],
-              file = paste0("../results/counts_", name, ".tsv"),
+              file = paste0(path.out,"counts_", name, ".tsv"),
               sep = "\t", quote = FALSE, col.names = NA)}
 ```
 
@@ -406,8 +409,9 @@ The annotation file has multiple transcript isoforms per gene (e.g., g1.t1 and g
 
 1. Extract the gene-level ID
 2. Match it to the count matrix format (with `aip_` prefix)
-3. Deduplicate to one annotation per gene
+3. Deduplicate to one annotation per gene 
 
+## 7.1 Parse Aiptasia annotations
 ```{r prepare-annotations}
 # Step 1: Extract gene ID from Protein_ID
 aip_annotate <- aip_annotate %>%
@@ -436,6 +440,7 @@ aip_annotate <- aip_annotate %>%
 The three bacterial genomes were annotated with [Bakta](https://github.com/oschwengers/bakta). The GFF3 files contain rich `Name=` (product), `gene=`, `KEGG:`, and `COG:` fields in the attributes column. We parse CDS features to build annotation tables matching the count matrix gene IDs (`lab_AODPDA_XXXXX`, `rue_LDIBIJ_XXXXX`, `vib_BPEJFA_XXXXX`).
 
 ```{r parse-bacterial-gff3}
+library(dplyr)
 parse_bakta_gff3 <- function(gff3_path, prefix) {
   lines <- readLines(gff3_path)
   lines <- lines[!grepl("^#", lines) & nchar(lines) > 0]
@@ -462,15 +467,15 @@ parse_bakta_gff3 <- function(gff3_path, prefix) {
       gene_id = paste0(prefix, "_", locus_tag),
       go_terms = ifelse(go_terms == "", NA, go_terms)
     ) %>%
-    select(gene_id, locus_tag, gene_name, product, kegg, cog_id, go_terms) %>%
+    dplyr::select(gene_id, locus_tag, gene_name, product, kegg, cog_id, go_terms) %>%
     distinct(gene_id, .keep_all = TRUE)
 
   return(gff_cds)
 }
 
-annot_lab <- parse_bakta_gff3("../data/labrenzia.gff3", "lab")
-annot_rue <- parse_bakta_gff3("../data/ruegeria.gff3",  "rue")
-annot_vib <- parse_bakta_gff3("../data/vibrio.gff3",    "vib")
+annot_lab <- parse_bakta_gff3(file.path(path.in,"labrenzia.gff3"), "lab")
+annot_rue <- parse_bakta_gff3(file.path(path.in,"ruegeria.gff3"),  "rue")
+annot_vib <- parse_bakta_gff3(file.path(path.in,"vibrio.gff3"), "vib")
 
 annot_bact <- bind_rows(
   annot_lab %>% mutate(organism = "Labrenzia"),
@@ -491,7 +496,7 @@ cat("Vibrio:", nrow(annot_vib), "CDS,", sum(!is.na(annot_vib$gene_name)), "with 
 The *Symbiodiniaceae* genes in the combined GTF have `gene` and `product` attributes on transcript lines. We extract one annotation per gene_id.
 
 ```{r parse-symbiont-gtf}
-gtf_lines <- readLines("../data/combined_annotation.gtf")
+gtf_lines <- readLines(file.path(path.in,"combined_annotation.gtf"))
 sym_transcript_lines <- gtf_lines[grepl("^sym_", gtf_lines) & grepl("\\ttranscript\\t", gtf_lines)]
 
 annot_sym <- data.frame(raw = sym_transcript_lines, stringsAsFactors = FALSE) %>%
@@ -500,7 +505,7 @@ annot_sym <- data.frame(raw = sym_transcript_lines, stringsAsFactors = FALSE) %>
     gene_name = str_extract(raw, 'gene "([^"]+)"', group = 1),
     product   = str_extract(raw, 'product "([^"]+)"', group = 1)
   ) %>%
-  select(-raw) %>%
+  dplyr::select(-raw) %>%
   filter(!is.na(gene_id)) %>%
   distinct(gene_id, .keep_all = TRUE)
 
@@ -523,6 +528,8 @@ cat("Symbiont:", nrow(annot_sym), "genes,",
 # 8. DESeq2 Analysis — Host (*Aiptasia*)
 
 Host differential expression analysis using DESeq2. DESeq2 models RNA-seq count data using a negative binomial distribution, accounts for library size differences between samples, and uses shrinkage to produce more reliable fold-change estimates.
+
+Might be a better choice for RNA-seq data as it is well ground truthed in the field
 
 ## 8.1 Create DESeq Object and Filter Low-Count Genes
 
@@ -569,7 +576,7 @@ p <- ggplot(pca_data, aes(x = PC1, y = PC2, color = treatment, shape = timepoint
        y = paste0("PC2: ", percent_var[2], "% variance"),
        title = "PCA — Aiptasia")
 p
-ggsave("../results/pca_host_all.pdf", p, width = 7, height = 5)
+ggsave("pca_host_all.pdf", p, width = 7, height = 5)
 # Timepoint is the dominant source of variation, although controls at 1dpi cluster with all 21dpi, suggesting variation largely due to ABS influence
 ```
 
