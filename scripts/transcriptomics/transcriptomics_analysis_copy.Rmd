@@ -545,6 +545,7 @@ Host differential expression analysis using DESeq2. DESeq2 models RNA-seq count 
 
 The design should include three terms: timepoint, teratment and treatment:timepoint interaction
 
+Note (June 29): there is an alternatively approach that we could try, namely aggragete gene counts within samples by GO categegory and do a DEG analysis of those counts, the resolution will be limited but could also be more ecologically informative? Need to think on this as we are already getting good seperate below
 
 ## 8.1 Create DESeq object, filter data and run LRT test
 
@@ -561,7 +562,7 @@ cat(nrow(dds_aip), "genes before filtering\n")
 keep <- rowSums(counts(dds_aip) >= 10) >= 4
 dds_aip <- dds_aip[keep, ]
 cat(nrow(dds_aip), "genes after filtering\n")
-#removes genes that don't have at least 10 counts in at least 4 samples
+#removes genes that don't have at least 10 counts in at least 4 samples, this helps to reduced noise in analysis 
 ```
 
 ## 8.2 Run DESeq analysis 
@@ -635,16 +636,14 @@ pheatmap(sampleDistMatrix,
 
 
 ## 8.4 Contrasts
-
-### 1 dpi
+### 1dpi
 ```{r 1 dpi contrasts}
 tp<-'1dpi'
 dds_aip_1dpi <- ds[, ds$timepoint == tp]
 dds_aip_1dpi$timepoint <- droplevels(dds_aip_1dpi$timepoint)
 design(dds_aip_1dpi) <- ~ treatment
 dds_aip_1dpi <- DESeq(dds_aip_1dpi)
-```
-```{r deseq-aip-1dpi}
+
 # contrasts of all treatments in comparison to ABS
 res_aip_1dpi_control <- results(dds_aip_1dpi, contrast = c("treatment", "FASW", "ABS"))
 res_aip_1dpi_ISOA <- results(dds_aip_1dpi, contrast = c("treatment", "Labrenzia", "ABS"))
@@ -659,15 +658,13 @@ res_aip_1dpi_ISOC_vs_ISOABC <- results(dds_aip_1dpi, contrast = c("treatment", "
 ```
 
 ### 21 dpi
-### 1 dpi
 ```{r 1 dpi contrasts}
 tp<-'21dpi'
 dds_aip_21dpi <- ds[, ds$timepoint == tp]
 dds_aip_21dpi$timepoint <- droplevels(dds_aip_21dpi$timepoint)
 design(dds_aip_21dpi) <- ~ treatment
 dds_aip_21dpi <- DESeq(dds_aip_21dpi)
-```
-```{r deseq-aip-1dpi}
+
 # contrasts of all treatments in comparison to ABS
 res_aip_21dpi_control <- results(dds_aip_21dpi, contrast = c("treatment", "FASW", "ABS"))
 res_aip_21dpi_ISOA <- results(dds_aip_21dpi, contrast = c("treatment", "Labrenzia", "ABS"))
@@ -681,9 +678,444 @@ res_aip_21dpi_ISOB_vs_ISOABC <- results(dds_aip_21dpi, contrast = c("treatment",
 res_aip_21dpi_ISOC_vs_ISOABC <- results(dds_aip_21dpi, contrast = c("treatment", "Vibrio", "multi"))
 ```
 
-### 8.5 Visualization
-#### bicluster heatmap
-plotting genes with p values < 0.05, not looking at FC values currently in heatmap 
+## 8.5 Annotation tables of DEGs
+GO IDs are swissprot annotations
+```{r - define function to make table}
+make_deg_table <- function(comp_data, comparison, timepoint, annotation_table = aip_annotate) {
+  res <- data.frame(comp_data) %>%
+    filter(padj < 0.05) %>% #change if needed
+    rownames_to_column(var = "gene_id") %>%
+    left_join(annotation_table, by = "gene_id") %>%
+    mutate(comp = comparison, timepoint=timepoint) %>%
+    mutate(
+      'go_ids'=GO_IDs..SwissProt., 
+      'go_cat'=GO_categories..SwissProt., 
+      'go_bp'=GO_BP..SwissProt.,
+      'go_mf'=GO_MF..SwissProt.,
+      'go_cc'=GO_CC..SwissProt.) %>% 
+    dplyr::select(
+      gene_id, comp,timepoint, baseMean, log2FoldChange, lfcSE, stat, padj,
+      protein_name, go_ids, go_cat,
+      go_bp, go_mf, go_cc, KEGG_ID
+    )
+  return(res)
+}
+```
+
+###1 dpi
+```{r - apply to each deg set}
+deg_set_fasw_v_abs_1dpi<-make_deg_table(res_aip_1dpi_control,'FASW_vs_ABS','1dpi',aip_annotate)
+deg_set_lab_v_abs_1dpi<-make_deg_table(res_aip_1dpi_ISOA,'Labrenzia_vs_ABS','1dpi',aip_annotate)
+deg_set_reu_v_abs_1dpi<-make_deg_table(res_aip_1dpi_ISOB,'Reugeria_vs_ABS','1dpi',aip_annotate)
+deg_set_vib_v_abs_1dpi<-make_deg_table(res_aip_1dpi_ISOC,'Vibrio_vs_ABS','1dpi',aip_annotate)
+deg_set_multi_v_abs_1dpi<-make_deg_table(res_aip_1dpi_ISOABC,'Multi_vs_ABS','1dpi',aip_annotate)
+
+deg_set_lab_v_multi_1dpi<-make_deg_table(res_aip_1dpi_ISOA_vs_ISOABC,'ISOA_vs_ISOABC','1dpi',aip_annotate)
+deg_set_reu_v_multi_1dpi<-make_deg_table(res_aip_1dpi_ISOB_vs_ISOABC,'ISOB_vs_ISOABC','1dpi',aip_annotate)
+deg_set_vib_v_multi_1dpi<-make_deg_table(res_aip_1dpi_ISOC_vs_ISOABC,'ISOC_vs_ISOABC','1dpi',aip_annotate)
+```
+### 21dpi
+```{r - apply to each deg set}
+deg_set_fasw_v_abs_21dpi<-make_deg_table(res_aip_21dpi_control,'FASW_vs_ABS','21dpi',aip_annotate)
+deg_set_lab_v_abs_21dpi<-make_deg_table(res_aip_21dpi_ISOA,'Labrenzia_vs_ABS','21dpi',aip_annotate)
+deg_set_reu_v_abs_21dpi<-make_deg_table(res_aip_21dpi_ISOB,'Reugeria_vs_ABS','21dpi',aip_annotate)
+deg_set_vib_v_abs_21dpi<-make_deg_table(res_aip_21dpi_ISOC,'Vibrio_vs_ABS','21dpi',aip_annotate)
+deg_set_multi_v_abs_21dpi<-make_deg_table(res_aip_21dpi_ISOABC,'Multi_vs_ABS','21dpi',aip_annotate)
+
+deg_set_lab_v_multi_21dpi<-make_deg_table(res_aip_21dpi_ISOA_vs_ISOABC,'ISOA_vs_ISOABC','21dpi',aip_annotate)
+deg_set_reu_v_multi_21dpi<-make_deg_table(res_aip_21dpi_ISOB_vs_ISOABC,'ISOB_vs_ISOABC','21dpi',aip_annotate)
+deg_set_vib_v_multi_21dpi<-make_deg_table(res_aip_21dpi_ISOC_vs_ISOABC,'ISOC_vs_ISOABC','21dpi',aip_annotate)
+```
+
+
+```{r - combine deg tables}
+deg_names <- ls(pattern = "^deg_set")
+deg_list <- mget(deg_names) #put dataframes into list 
+deg_list <- deg_list[!sapply(deg_list, is.null)]# Drop any NULLs
+deg_list <- deg_list[sapply(deg_list, nrow) > 0] # Drop any with 0 rows
+combined_deg <- bind_rows(deg_list, .id = "source")
+write.csv(combined_deg,file.path(path.out,'DEGs.csv'))
+```
+
+## 8.6 Heatmap
+
+- Plot DEGs from each treatment (Labrenzia, Reugeria, Vibrio and Mult) vs ABS comparison 
+- Filter genes with padj < 0.05
+
+#### 1 dpi
+```{r}
+timepoint_label<-'1dpi'
+vsd<-vsd_aip
+
+sig_genes <- unique(c(
+  rownames(subset(as.data.frame(res_aip_1dpi_ISOA), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_1dpi_ISOB), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_1dpi_ISOC), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_1dpi_ISOABC), padj < 0.05))
+))
+
+#get mat and transform to z-score
+mat<-assay(vsd[, vsd$timepoint == timepoint_label])[sig_genes, ] 
+mat_z<-t(scale(t(mat)))
+mat<-mat[complete.cases(mat_z),]
+
+title<-cat(timepoint_label, "union DEGs:", length(sig_genes), "->", nrow(mat_z), "plotted\n")
+
+# Column annotation
+ann_col <- data.frame(
+    Treatment = vsd[, vsd$timepoint == timepoint_label]$treatment,
+    row.names = colnames(mat_z))
+
+#row annotations
+row_lab <- aip_annotate$protein_name[match(rownames(mat_z), aip_annotate$gene_id)]
+
+p <- pheatmap(mat_z,
+    annotation_col = ann_col,
+    annotation_colors = list(
+    Treatment = palette),
+    show_rownames = TRUE,
+    show_colnames = F,
+    labels_row = row_lab,
+    fontsize_row = 5.5,
+    cutree_rows = 3,
+    cutree_cols = 4,
+    main = paste0("DEGs, Aiptasia ", timepoint_label,
+                  " (", nrow(mat_z), " genes), Z-score"),
+    silent = TRUE)
+grid::grid.newpage(); grid::grid.draw(p$gtable)
+```
+#### 21 dpi
+```{r}
+timepoint_label<-'21dpi'
+vsd<-vsd_aip
+
+sig_genes <- unique(c(
+  rownames(subset(as.data.frame(res_aip_21dpi_ISOA), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_21dpi_ISOB), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_21dpi_ISOC), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_21dpi_ISOABC), padj < 0.05))
+))
+
+#get mat and transform to z-score
+mat<-assay(vsd[, vsd$timepoint == timepoint_label])[sig_genes, ] 
+mat_z<-t(scale(t(mat)))
+mat<-mat[complete.cases(mat_z),]
+
+title<-cat(timepoint_label, "union DEGs:", length(sig_genes), "->", nrow(mat_z), "plotted\n")
+
+# Column annotation
+ann_col <- data.frame(
+    Treatment = vsd[, vsd$timepoint == timepoint_label]$treatment,
+    row.names = colnames(mat_z))
+
+#row annotations
+row_lab <- aip_annotate$protein_name[match(rownames(mat_z), aip_annotate$gene_id)]
+
+p <- pheatmap(mat_z,
+    annotation_col = ann_col,
+    annotation_colors = list(
+    Treatment = palette),
+    show_rownames = TRUE,
+    show_colnames = F,
+    labels_row = row_lab,
+    fontsize_row = 5.5,
+    cutree_rows = 3,
+    cutree_cols = 4,
+    main = paste0("DEGs, Aiptasia ", timepoint_label,
+                  " (", nrow(mat_z), " genes), Z-score"),
+    silent = TRUE)
+grid::grid.newpage(); grid::grid.draw(p$gtable)
+```
+
+
+
+
+# Sandbox code
+
+
+## 8.5 Annotations and DEG tables
+Steps: 
+1. Convert annotations to long format 
+2. select annotations that have p < 0.05
+3. Make new annotation df for each comparison, add pvalue and log2fc for each sig gene
+4. Make plot showing logfc (x axis) and GO category Y access and size of bubble p-value
+
+```{r convert aip to long format}
+library(GO.db)
+go_long <-aip_annotate %>%
+  dplyr::select(gene_id, GO_IDs..SwissProt.) %>%
+  separate_rows(GO_IDs..SwissProt., sep = ";\\s*") %>%
+  dplyr::rename(go_id = GO_IDs..SwissProt.) %>%
+  mutate(go_id = trimws(go_id)) %>%
+  filter(go_id != "", !is.na(go_id)) %>%
+  mutate(
+    term     = sapply(go_id, function(id) tryCatch(GOTERM[[id]]@Term,     error = function(e) NA)),
+    ontology = sapply(go_id, function(id) tryCatch(GOTERM[[id]]@Ontology, error = function(e) NA))
+  )
+head(go_long)
+```
+
+```{r}
+length(unique(go_long$term))
+length(unique(go_long$go_id))
+```
+
+
+
+###1 dpi contrasts
+#### FASW vs. ABS
+```{r}
+
+#set sig genes
+res<-data.frame(res_aip_1dpi_control) %>% 
+  filter(padj < 0.05) %>% 
+  rownames_to_column(var = "gene_id") 
+
+degs<-res %>% pull(gene_id) %>% unique()
+
+#get annotation table
+annot.tmp<- go_long %>% 
+              filter(gene_id %in% degs) 
+
+# merge
+df <- annot.tmp %>%
+  left_join(res, by = "gene_id")
+
+# Plot
+
+top_n_genes <- 15
+
+# Step 1: find top N gene_ids by padj
+top_genes <- df %>%
+  distinct(gene_id, padj) %>%
+  slice_min(padj, n = top_n_genes) %>%
+  pull(gene_id)
+
+# Step 2: filter original df to just those genes
+plot_data <- df %>%
+  filter(gene_id %in% top_genes) %>%
+  distinct(gene_id, term, ontology, log2FoldChange, padj) %>%
+  mutate(gene_id = fct_reorder(gene_id, log2FoldChange))
+
+ggplot(plot_data, aes(x = log2FoldChange, y = term, size = -log10(padj), color = ontology)) +
+  geom_point(alpha = 0.7) +
+  scale_size_continuous(name = "-log10(padj)", range = c(2, 10)) +
+  labs(
+    x = "log2 Fold Change",
+    y = "Gene",
+    color = "Ontology"
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 5))
+```
+
+#### Labrenzia vs. ABS
+```{r}
+#set sig genes
+res<-data.frame(res_aip_1dpi_ISOA) %>% 
+  filter(padj < 0.05) %>% 
+  rownames_to_column(var = "gene_id") 
+
+degs<-res %>% pull(gene_id) %>% unique()
+
+#get annotation table
+annot.tmp<- go_long %>% 
+              filter(gene_id %in% degs) 
+
+# merge
+df <- annot.tmp %>%
+  left_join(res, by = "gene_id")
+
+# Plot
+
+top_n_genes <- 15
+
+# Step 1: find top N gene_ids by padj
+top_genes <- df %>%
+  distinct(gene_id, padj) %>%
+  slice_min(padj, n = top_n_genes) %>%
+  pull(gene_id)
+
+# Step 2: filter original df to just those genes
+plot_data <- df %>%
+  filter(gene_id %in% top_genes) %>%
+  distinct(gene_id, term, ontology, log2FoldChange, padj) %>%
+  mutate(gene_id = fct_reorder(gene_id, log2FoldChange))
+
+ggplot(plot_data, aes(x = log2FoldChange, y = term, size = -log10(padj), color = ontology)) +
+  geom_point(alpha = 0.7) +
+  scale_size_continuous(name = "-log10(padj)", range = c(2, 10)) +
+  labs(
+    x = "log2 Fold Change",
+    y = "Gene",
+    color = "Ontology"
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 5))
+```
+
+#### Reugeria vs. ABS
+```{r}
+#set sig genes
+res<-data.frame(res_aip_1dpi_ISOB) %>% 
+  filter(padj < 0.05) %>% 
+  rownames_to_column(var = "gene_id") 
+
+degs<-res %>% pull(gene_id) %>% unique()
+
+#get annotation table
+annot.tmp<- go_long %>% 
+              filter(gene_id %in% degs) 
+
+# merge
+df <- annot.tmp %>%
+  left_join(res, by = "gene_id")
+
+# Plot
+
+top_n_genes <- 15
+
+# Step 1: find top N gene_ids by padj
+top_genes <- df %>%
+  distinct(gene_id, padj) %>%
+  slice_min(padj, n = top_n_genes) %>%
+  pull(gene_id)
+
+# Step 2: filter original df to just those genes
+plot_data <- df %>%
+  filter(gene_id %in% top_genes) %>%
+  distinct(gene_id, term, ontology, log2FoldChange, padj) %>%
+  mutate(gene_id = fct_reorder(gene_id, log2FoldChange))
+
+ggplot(plot_data, aes(x = log2FoldChange, y = term, size = -log10(padj), color = ontology)) +
+  geom_point(alpha = 0.7) +
+  scale_size_continuous(name = "-log10(padj)", range = c(2, 10)) +
+  labs(
+    x = "log2 Fold Change",
+    y = "Gene",
+    color = "Ontology"
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 5))
+```
+
+
+
+
+- Use GO.db to categorize annotations of DEGs
+- Generate one DEG tables containing the following:
+  - Gene ID, logFC, adj.p value, comparison, dpi
+
+```{r}
+#get DEGs
+#get sig genes
+sig_genes <- unique(c(
+  rownames(subset(as.data.frame(res_aip_1dpi_ISOA), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_1dpi_ISOB), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_1dpi_ISOC), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_1dpi_ISOABC), padj < 0.05))
+))
+```
+
+parse SwissProt GO Terms 
+```{r}
+library(GO.db)
+go_long <-aip_annotate %>%
+  dplyr::select(gene_id, GO_IDs..SwissProt.) %>%
+  separate_rows(GO_IDs..SwissProt., sep = ";\\s*") %>%
+  dplyr::rename(go_id = GO_IDs..SwissProt.) %>%
+  mutate(go_id = trimws(go_id)) %>%
+  filter(go_id != "", !is.na(go_id)) %>%
+  mutate(
+    term     = sapply(go_id, function(id) tryCatch(GOTERM[[id]]@Term,     error = function(e) NA)),
+    ontology = sapply(go_id, function(id) tryCatch(GOTERM[[id]]@Ontology, error = function(e) NA)),
+    is_deg   = gene_id %in% sig_genes
+  )
+head(go_long)
+```
+
+take GO terms, make dataframe for each treament enriched in and get plot for each treatment
+
+
+```{r}
+# ── 3. count genes per GO term, split by DEG status ─────────────────────────
+go_counts <- go_long %>%
+  filter(!is.na(term), !is.na(ontology)) %>%
+  group_by(go_id, term, ontology) %>%
+  summarise(
+    n_total = n(),
+    n_deg   = sum(is_deg),
+    .groups = "drop"
+  ) %>%
+  filter(n_deg > 0) %>%                        # only keep terms with at least 1 DEG
+  mutate(pct_deg = n_deg / n_total * 100)
+
+# ── 4. plot: top N GO terms by number of DEGs, faceted by ontology ───────────
+top_n_per_ontology <- 15   # adjust as needed
+
+plot_data <- go_counts %>%
+  group_by(ontology) %>%
+  slice_max(n_deg, n = top_n_per_ontology) %>%
+  ungroup() %>%
+  mutate(term = stringr::str_wrap(term, width = 35),          # wrap long labels
+         term = reorder(term, n_deg))
+
+ggplot(plot_data, aes(x = term, y = n_deg, fill = ontology)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(n_deg, "/", n_total)),         # show deg/total
+            hjust = -0.1, size = 3) +
+  coord_flip() +
+  facet_wrap(~ ontology, scales = "free_y",
+             labeller = labeller(ontology = c(BP = "Biological Process",
+                                              CC = "Cellular Component",
+                                              MF = "Molecular Function"))) +
+  scale_fill_manual(values = c(BP = "#4E79A7", CC = "#F28E2B", MF = "#59A14F")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2))) +  # room for labels
+  labs(
+    title    = "GO Terms enriched in DEGs",
+    subtitle = paste0("DEGs: padj < 0.05, |log2FC| > 1 (n = ", length(sig_genes), ")"),
+    x        = NULL,
+    y        = "Number of DEGs"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(strip.text  = element_text(face = "bold"),
+        panel.grid.major.y = element_blank())
+```
+
+
+
+
+
+```{r}
+res_aip_1dpi_ISOA
+```
+
+
+```{r}
+tmp<-aip_annotate[match(rownames(mat_z), aip_annotate$gene_id),]
+```
+
+
+
+
+
+
+# 9.0 DESeq2 analysis on aggregated GOs
+
+Structure: GOs --> SWISS Prot
+1. Add annotations to count table 
+2. Aggregate counts by GO string 
+3. Run DESEQ2 on GO categories 
+3. Visualize 
+
+
+
+
+
+
+
+
+
 
 --> pick up here!
 ```{r helper for bicluster - GO categories}
@@ -886,7 +1318,6 @@ make_deg_heatmap <- function(sig_genes, vsd, timepoint_label) {
 }
 ```
 
-#####1 dpi
 ```{r plotting}
 sig_1dpi_union <- unique(c(
   rownames(subset(as.data.frame(res_aip_1dpi_ISOA), padj < 0.05)),
@@ -894,6 +1325,9 @@ sig_1dpi_union <- unique(c(
   rownames(subset(as.data.frame(res_aip_1dpi_ISOC), padj < 0.05)),
   rownames(subset(as.data.frame(res_aip_1dpi_ISOABC), padj < 0.05))
 ))
+
+sig<-results_1dpi %>% filter(padj<0.05) %>% pull(gene_id) %>% unique()
+
 out_1dpi <- make_deg_heatmap(sig_1dpi_union, vsd_aip, "1dpi")
 ```
 
@@ -919,7 +1353,7 @@ out_21dpi <- make_deg_heatmap(sig_21dpi_union, vsd_aip, "1dpi")
 
 
 # Archive
-## my way below -->
+
 
 ```{r}
 ds$group <- factor(paste0(ds$timepoint, ds$treatment))
