@@ -1,8 +1,13 @@
 ---
 title: "Transcriptomic Analysis - Host DESeq2"
 author: "Maggie Sogin"
-date: "2026-07-02"
-output: html_document
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
 ---
 
 ```{r setup, include=FALSE}
@@ -15,6 +20,46 @@ knitr::opts_chunk$set(
   fig.align = "center"   # Center all figures
 )
 ```
+
+# Introduction
+
+This notebook analyzes metatranscriptomic (RNA-seq) data from an *Aiptasia* bacterial inoculation experiment. *Aiptasia* were first treated with antibiotics to reduce their native microbiome, then inoculated with one of three bacterial symbionts to examine changes in host, algal symbiont, and bacterial gene expression.
+
+*Still needed*:
+refine annotation categories at end of DEGs and look at unannoated ones for TrEMBL annotations
+
+**Treatments:**
+
+- **control/FASW** — no antibiotics, no inoculation (natural microbiome)
+- **ABS** — antibiotics only (microbiome-depleted baseline)
+- **ISOA/Labrenzia** — antibiotics + *Labrenzia aggregata* inoculation
+- **ISOB/Ruegeria** — antibiotics + *Ruegeria mobilis* inoculation
+- **ISOC/Vibrio** — antibiotics + *Vibrio alginolyticus* inoculation
+- **ISOABC/multi** — antibiotics + all three bacteria combined
+
+**Timepoints:** 1 day post-inoculation (1dpi) and 21 days post-inoculation (21dpi)
+
+**Replicates:** 4 biological replicates per treatment per timepoint = **48 samples total**
+
+**Previous pipeline:** Raw reads were processed with fastp (quality trimming) → SortMeRNA (rRNA removal) → HISAT2 (alignment to a combined reference genome containing *Aiptasia* host, *Symbiodiniaceae* symbiont, *Labrenzia*, *Ruegeria*, and *Vibrio*) → featureCounts (gene-level quantification).
+
+**Biological questions:**
+
+1. What are the general expression patterns across treatments and timepoints?
+2. How does bacterial inoculation affect host immune gene expression?
+3. Are there changes in sulfur cycling genes, particularly in *Labrenzia* and *Ruegeria*?
+
+**Updated questions**
+1. Is there a common host response to bacteria inoculation regardless of treatment?
+- compare ABS to each treatment at each timepoint 
+
+2. How does host expression change when inoculated with vibrio alone vs. in multi-species combinations? 
+Hypotheses: 
+- Host gene expression is more similar with inoculations of beneficial microbes vs pathogen
+- Inoculation of multispecies together causes differences in host gene expression 
+- Inoculation of pathogen results in DE expression of key genes involved in immune systems and the presence of other bacteria dampens that response (idea --> BMCs do not want to be targeted?)
+
+3. Are there changes in host gene expression that work to recognizing BMCs and not pathogens? 
 
 # 1. Load Libraries & Define Constants
 
@@ -510,31 +555,32 @@ deg_df_annot <- deg_df %>%
          category = sapply(search_text, assign_category, keyword_list = category_keywords))
 
 ```
+
 ```{r}
 #manual adjust some entries 
 manual_overrides <- tribble(
   ~gene_id,      ~category,   ~override_reason,
   "aip_g1487",  "signaling",  "TrEMBL annotation Notch signaling pathway",
   "aip_g24879", "catabolic processes", "TrEMBL annotation oxidoreductase activity [GO:0016627]",
-  "aip_g24878",  "Unknown",             "WAPA -- bacterial toxin-antitoxin gene (B. subtilis), likely spurious/low-confidence BLAST hit, not trustworthy for host functional classification")
+  "aip_g24878",  "Unknown",             "WAPA -- bacterial toxin-antitoxin gene (B. subtilis)")
   
 
 # apply overrides on top of automatic keyword-based category
-deg_df_annot <- deg_df_annot %>%
+deg_df_annot2 <- deg_df_annot %>%
   left_join(manual_overrides, by = "gene_id", suffix = c("_auto", "")) %>%
   mutate(
     category_final = coalesce(category, category_auto),  # override wins if present, else keep automatic
     was_overridden = !is.na(category)
   ) %>%
-  select(-category) %>%
-  rename(category_auto = category_auto, category = category_final)
+  dplyr::select(-category) %>%
+  dplyr::rename(category_auto = category_auto, category = category_final)
 
 #summary
 table(deg_df_annot$category)
 ```
 
 ```{r}
-tmp<-degs_of_interest %>% filter(category == "Other/Uncategorized") 
+#tmp<-degs_of_interest %>% filter(category == "Other/Uncategorized") 
 #write.csv(tmp,'~/Desktop/tmp_uncat_full.csv')
 ```
 
@@ -551,7 +597,7 @@ norm_sub <- norm_counts[rownames(norm_counts) %in% deg_ids, , drop = FALSE]
 #get metadata
 sample_meta <- as.data.frame(colData(ds_sf)) %>%
   mutate(sample = rownames(colData(ds_sf))) %>%
-  select(sample, treatment, timepoint)
+  dplyr::select(sample, treatment, timepoint)
 
 #get means and se for each gene
 expr_df <- as.data.frame(norm_sub) %>%
@@ -569,7 +615,7 @@ expr_df <- as.data.frame(norm_sub) %>%
 # pull ABS mean per gene x timepoint as the baseline to divide by
 abs_means <- expr_df %>%
   filter(treatment == "ABS") %>%
-  select(gene_id, timepoint, abs_mean = mean_avg)
+  dplyr::select(gene_id, timepoint, abs_mean = mean_avg)
 
 # compute relative mean + relative SE
 expr_rel_df <- expr_df %>%
@@ -584,7 +630,7 @@ expr_rel_df %>% filter(is.infinite(rel_mean) | is.nan(rel_mean))
 
 # add categories
 gene_labels <- deg_df_annot %>%
-  select(gene_id, category, protein_name) %>%
+  dplyr::select(gene_id, category, protein_name) %>%
   distinct(gene_id, .keep_all = TRUE)
 
 expr_rel_plot <- expr_rel_df %>%
