@@ -1,0 +1,553 @@
+---
+title: "RNASeq data processing"
+author: "Hailey Hatch & Maggie Sogin"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+---
+
+# Introduction
+
+This notebook processes metatranscriptomic (RNA-seq) data from an *Aiptasia* bacterial inoculation experiment. *Aiptasia* were first treated with antibiotics to reduce their native microbiome, then inoculated with one of three bacterial symbionts to examine changes in host, algal symbiont, and bacterial gene expression.
+
+The script below aims to process data from RNA-Seq experiment and includes the following: 
+
+1. Load in data 
+2. Get Counts from featurecounts (saved) 
+3. Get TPM Counts (not saved)
+4. QC plots
+5. Clean and split tables, save by organism
+6. Prepare annotations
+
+At the end of this code, we save the following files for downstream analysis:
+- cleaned feature counts table per species
+- processed annotation files for aiptasia, bacteria and symbiodinium
+
+**Previous pipeline:** Raw reads were processed with fastp (quality trimming) → SortMeRNA (rRNA removal) → HISAT2 (alignment to a combined reference genome containing *Aiptasia* host, *Symbiodiniaceae* symbiont, *Labrenzia*, *Ruegeria*, and *Vibrio*) → featureCounts (gene-level quantification).
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,           # Show code in the output
+  warning = FALSE,       # Hide warning messages
+  message = FALSE,       # Hide package loading messages
+  fig.width = 10,        # Default figure width (inches)
+  fig.height = 6,        # Default figure height (inches)
+  fig.align = "center"   # Center all figures
+)
+```
+
+
+# 1. Load Libraries & Define Constants
+
+```{r load-libraries}
+library(readxl)
+library(tidyverse)
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(matrixStats)
+library(ggrepel)
+library(patchwork)
+library(UpSetR)
+library(stringr)
+library(topGO)
+library(vegan)
+library(dplyr)
+library("RColorBrewer")
+library(scales)
+```
+
+```{r define-constants}
+palette <- c(
+  "FASW" = 'grey60',
+  "ABS"     = 'black',
+  "Labrenzia"    = '#A6CEE3',
+  "Ruegeria"    = '#1F78B4',
+  "Vibrio"    = '#B2DF8A',
+  "multi"  = 'violet')
+treatment_levels <- c(
+  "control" = "FASW", 
+  "ABS" = "ABS", 
+  "ISOA" = "Labrenzia", 
+  "ISOB" = "Ruegeria", 
+  "ISOC" = "Vibrio", 
+  "ISOABC" = "multi")
+
+path.out<-"../../output/transcriptomics"
+path.in<-"../../data/transcriptomics"
+```
+
+
+# 2. Load All Data Files
+
+```{r load-all-data}
+# featureCounts gene count matrix (6 annotation cols + 48 samples)
+counts_raw <- read.delim(file.path(path.in,"counts.tsv"), comment.char = "#", check.names = FALSE)
+
+# featureCounts assignment summary
+counts_summary <- read.delim(file.path(path.in,"counts.tsv.summary"), check.names = FALSE)
+
+# HISAT2 alignment rates
+hisat2_sum <- read.delim(file.path(path.in,"hisat2_alignment_summary.tsv"))
+
+# Per-reference organism read counts (aip, sym, lab, rue, vib)
+organism_counts <- read.delim(file.path(path.in,"per_reference_counts.tsv"))
+
+# SortMeRNA rRNA removal summary
+sortme_sum <- read.delim(file.path(path.in,"sortmerna_summary.tsv"))
+
+# Fastp trimming summary
+fastp_sum <- read.delim(file.path(path.in,"fastp_summary_per_sample.tsv"), check.names = FALSE)
+
+# Aiptasia gene annotations (SwissProt/TrEMBL BLAST, GO, KEGG)
+aip_annotate <- read.delim(file.path(path.in,"Aiptasia_annotation_file.csv"))
+length(aip_annotate$Protein_ID)
+```
+
+
+# 3. Build Sample Metadata
+
+Create the `colData` data frame that DESeq2 requires. We'll parse treatment and timepoint directly from the sample names so it's fully reproducible.
+
+```{r build-metadata}
+# Step 1: Make function to clean sample names
+clean_sample_name <- function(x) {gsub("_S\\d+.*$", "", x)}
+
+# Step 2: Get sample column names from the counts data
+colnames(counts_raw) <- clean_sample_name(basename(colnames(counts_raw)))
+annotation_cols <- c("Geneid", "Chr", "Start", "End", "Strand", "Length")
+sample_names <- colnames(counts_raw)[!colnames(counts_raw) %in% annotation_cols]
+
+# Step 3: Parse treatment and timepoint from the clean names
+treatment <- str_extract(sample_names, "ISOABC|ISOA|ISOB|ISOC|ABS|control")
+timepoint <- str_extract(sample_names, "\\d+dpi")
+
+# Step 4: Create the colData data frame
+colData <- data.frame(row.names = sample_names, treatment = treatment, timepoint = timepoint)
+
+# Step 5: Convert treatment and timepoint to factors with your defined levels
+colData$treatment <- factor(treatment_levels[as.character(colData$treatment)], 
+                            levels = treatment_levels)
+colData$timepoint <- factor(colData$timepoint, levels = c("1dpi", "21dpi"))
+
+stopifnot(all(table(colData$treatment, colData$timepoint) == 4))
+
+# Make metadata by turning rownames into a regular column
+metadata <- colData %>% rownames_to_column("sample")
+
+# save colData
+
+write.csv(colData, file.path(path.out,'colData.csv'))
+```
+
+
+# 4. QC Summary Plots
+
+Visualize pipeline quality metrics to identify any problematic samples before DESeq2.
+
+## 4.1 Fastp — Read Quality & Trimming
+
+```{r plot-fastp}
+plot_QC_fastp <- fastp_sum %>%
+  mutate(sample = clean_sample_name(sample)) %>%
+  left_join(metadata, by = "sample") %>%
+  filter(!is.na(treatment)) %>%
+  arrange(treatment, timepoint) %>%
+  mutate(sample = fct_inorder(sample)) %>%
+  dplyr::select(sample, treatment, timepoint, reads_before, reads_after) %>%
+  pivot_longer(cols = c(reads_before, reads_after),
+               names_to = "stage", values_to = "reads") %>%
+  mutate(stage = factor(stage, levels = c("reads_before", "reads_after"),
+                        labels = c("Raw", "After Trimming"))) %>%
+  ggplot(aes(x = sample, y = reads / 1e6, fill = stage)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ timepoint, scales = "free_x") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Fastp: Read Counts Before & After Trimming",
+       y = "Reads (millions)", x = NULL)
+plot_QC_fastp
+# No extreme trimming; all samples ~125-225M reads
+```
+## 4.2 SortMeRNA — rRNA Removal Rates
+
+```{r plot-sortmerna}
+plot_QC_sortmerna <- sortme_sum %>%
+  mutate(sample = clean_sample_name(sample)) %>%
+  left_join(metadata, by = "sample") %>%
+  arrange(treatment, timepoint) %>%
+  mutate(sample = fct_inorder(sample)) %>%
+  ggplot(aes(x = sample, y = rRNA_pct, fill = treatment)) +
+  geom_col() +
+  facet_wrap(~ timepoint, scales = "free_x") +
+  scale_fill_manual(values = palette) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "SortMeRNA: rRNA Removal Rates", y = "rRNA (%)", x = NULL)
+plot_QC_sortmerna
+# ~5-20% rRNA; 21dpi slightly higher on average
+```
+## 4.3 HISAT2 — Alignment Rates
+
+```{r plot-hisat2}
+plot_QC_hisat2 <- hisat2_sum %>%
+  mutate(sample = clean_sample_name(sample)) %>%
+  left_join(metadata, by = "sample") %>%
+  arrange(treatment, timepoint) %>%
+  mutate(sample = fct_inorder(sample)) %>%
+  ggplot(aes(x = sample, y = `overall_alignment_rate...`, fill = treatment)) +
+  geom_col() +
+  facet_wrap(~ timepoint, scales = "free_x") +
+  scale_fill_manual(values = palette) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "HISAT2: Alignment Rates", y = "Alignment Rate (%)", x = NULL)
+plot_QC_hisat2
+# Alignment rates 50-75%
+```
+## 4.4  % Library Mapped to Each Genome
+
+```{r fig-s1-pct-mapped, fig.width=12, fig.height=6}
+# Compute % of total mapped reads assigned to each organism per sample
+figS1_data <- organism_counts %>%
+  mutate(sample = clean_sample_name(sample)) %>%
+  left_join(metadata, by = "sample") %>%
+  mutate(total = aip + sym + lab + rue + vib) %>%
+  pivot_longer(cols = c(aip, sym, lab, rue, vib),
+               names_to = "organism", values_to = "reads") %>%
+  mutate(pct_mapped = 100 * reads / total,
+         organism = factor(organism,
+                           levels = c("aip", "sym", "lab", "rue", "vib"),
+                           labels = c("Host", "Symbiodinium", "Labrenzia", "Ruegeria", "Vibrio")),
+         treatment = factor(treatment, levels = treatment_levels))
+
+plot_figS1 <- ggplot(figS1_data, aes(x = treatment, y = pct_mapped, color = organism)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(width = 0.2, size = 2.5, alpha = 0.8) +
+  facet_grid(organism ~ timepoint, scales = "free_y") +
+  scale_color_manual(values = c("Host" = "#1b9e77", "Symbiodinium" = "#d95f02",
+                                "Labrenzia" = "#A6CEE3", "Ruegeria" = "#1F78B4",
+                                "Vibrio" = "#B2DF8A")) +
+  ylim(0, NA) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none",
+        strip.text = element_text(face = "bold")) +
+  labs(title = "Fig S1 — % Library Mapped to Each Genome",
+       y = "% of reads mapped to genome", x = NULL)
+plot_figS1
+
+
+ggsave(file.path(path.out,"Fig_pct_mapped_by_genome.pdf"), plot_figS1, width = 12, height = 6)
+ggsave(file.path(path.out,"Fig_pct_mapped_by_genome.png"), plot_figS1, width = 12, height = 6, dpi = 300)
+```
+## 4.5 featureCounts — Read Assignment Summary
+
+```{r plot-featurecounts}
+colnames(counts_summary) <- clean_sample_name(basename(colnames(counts_summary)))
+
+fc_data <- counts_summary %>%
+  pivot_longer(cols = -Status, names_to = "sample", values_to = "reads") %>%
+  filter(reads > 0) %>%
+  left_join(metadata, by = "sample") %>%
+  arrange(treatment, timepoint) %>%
+  mutate(sample = fct_inorder(sample))
+
+plot_QC_featurecounts <- ggplot(fc_data, aes(x = sample, y = reads, fill = Status)) +
+  geom_col(position = "fill") +
+  facet_wrap(~ timepoint, scales = "free_x") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "featureCounts: Read Assignment", y = "Proportion", x = NULL)
+plot_QC_featurecounts
+# Assigned reads ~25% — low but expected for metatranscriptomic reference
+```
+
+## 4.6 featureCounts — Library Size
+
+```{r plot-library-size}
+plot_QC_library_size <- fc_data %>%
+  filter(Status == "Assigned") %>%
+  ggplot(aes(x = sample, y = reads / 1e6, fill = treatment)) +
+  geom_col() +
+  facet_wrap(~ timepoint, scales = "free_x") +
+  scale_fill_manual(values = palette) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Library Size (Assigned Reads)", y = "Reads (millions)", x = NULL)
+plot_QC_library_size
+# ~20-40M reads assigned to combined reference per sample
+```
+## 4.7 Save QC Plots
+
+```{r save-qc-plots}
+qc_plots <- list(
+  "plot_QC_fastp"         = plot_QC_fastp,
+  "plot_QC_sortmerna"     = plot_QC_sortmerna,
+  "plot_QC_hisat2"        = plot_QC_hisat2,
+  "plot_QC_featurecounts" = plot_QC_featurecounts,
+  "plot_QC_library_size"  = plot_QC_library_size)
+
+for (name in names(qc_plots)) {
+  ggsave(filename = file.path(path.out,paste0(name, ".pdf")),
+         plot = qc_plots[[name]],
+         width = 10, height = 6)
+  
+  ggsave(filename = file.path(path.out,paste0(name, ".png")),
+         plot = qc_plots[[name]],
+         width = 10, height = 6, dpi = 300)
+}
+```
+
+---
+
+# 5. Clean and Prepare the Count Matrix
+
+Transform the raw featureCounts output into a clean integer count matrix that DESeq2 can use.
+
+```{r clean-counts}
+# Save gene lengths for TPM calculation later
+gene_lengths <- counts_raw %>% 
+                dplyr::select(Geneid, Length) %>% column_to_rownames("Geneid")
+
+counts_matrix <- counts_raw %>%
+  dplyr::select(-Chr, -Start, -End, -Strand, -Length) %>%
+  column_to_rownames("Geneid") %>%
+  as.matrix()
+counts_matrix <- round(counts_matrix)
+
+all(colnames(counts_matrix) == rownames(colData))
+
+dim(counts_matrix)
+head(counts_matrix)
+```
+
+## 5.1 Compute TPM Matrix
+
+TPM (Transcripts Per Million) normalizes for both gene length and sequencing depth,
+making expression values comparable across samples AND genes
+
+TPM formula: for each gene in each sample,
+1. Divide raw count by gene length in kb → RPK (reads per kilobase)
+2. Sum all RPKs in that sample → scaling factor
+3. Divide each RPK by (scaling factor / 1e6) → TPM
+
+```{r compute-tpm}
+all(rownames(gene_lengths) == rownames(counts_matrix))
+
+gene_lengths_kb <- gene_lengths$Length / 1000
+
+rpk_matrix <- sweep(counts_matrix, 1, gene_lengths_kb, "/")
+
+scaling_factors <- colSums(rpk_matrix)
+
+tpm_matrix <- sweep(rpk_matrix, 2, scaling_factors / 1e6, "/")
+
+tpm_aip <- tpm_matrix[startsWith(rownames(tpm_matrix), "aip_"), ]
+tpm_sym <- tpm_matrix[startsWith(rownames(tpm_matrix), "sym_"), ]
+tpm_lab <- tpm_matrix[startsWith(rownames(tpm_matrix), "lab_"), ]
+tpm_rue <- tpm_matrix[startsWith(rownames(tpm_matrix), "rue_"), ]
+tpm_vib <- tpm_matrix[startsWith(rownames(tpm_matrix), "vib_"), ]
+
+dim(tpm_aip)
+```
+
+---
+
+# 6. Split Counts by Organism
+
+Analyzing organisms separately because:
+- Library size normalization should be computed within an organism
+- The biological questions differ per organism
+- Read depths vary (host: millions, bacteria: thousands)
+
+```{r split-by-organism}
+counts_aip <- counts_matrix[startsWith(rownames(counts_matrix), "aip_"), ]
+counts_sym <- counts_matrix[startsWith(rownames(counts_matrix), "sym_"), ]
+counts_lab <- counts_matrix[startsWith(rownames(counts_matrix), "lab_"), ]
+counts_rue <- counts_matrix[startsWith(rownames(counts_matrix), "rue_"), ]
+counts_vib <- counts_matrix[startsWith(rownames(counts_matrix), "vib_"), ]
+
+# Verify splits include all counts
+nrow(counts_aip) + nrow(counts_sym) + nrow(counts_lab) + nrow(counts_rue) + nrow(counts_vib) == nrow(counts_matrix)
+```
+
+Gene filtering
+- Below calculate the Nr of genes passing the filter, a gene is included in the filter if it has at least 10 reads in 4 samples across the entire dataset (Ref: deseq manual )
+
+```{r organism-summary-stats}
+organism_list <- list(
+  aip = counts_aip, sym = counts_sym,
+  lab = counts_lab, rue = counts_rue, vib = counts_vib)
+
+organism_summary <- data.frame(
+  organism = names(organism_list),
+  total_genes = sapply(organism_list, nrow),
+  median_counts_per_sample = sapply(organism_list, function(x) median(colSums(x))), #median nr. reads mapping to each sample
+  genes_all_zero = sapply(organism_list, function(x) sum(rowSums(x) == 0)), #nr genes no expression data at all 
+  genes_passing_filter = sapply(organism_list, function(x) sum(rowSums(x >= 10) >= 4)) # at least 10 counts in 4 samps
+)
+organism_summary
+# Few bacterial genes passed the filter
+```
+
+```{r save-organism-counts}
+for (name in names(organism_list)) {
+  write.csv(organism_list[[name]],
+            file = file.path(path.out, paste0("counts_", name, ".csv")),
+            quote = FALSE, row.names = TRUE)
+}
+```
+
+# 7. Prepare Annotation Data
+
+The annotation file has multiple transcript isoforms per gene (e.g., g1.t1 and g1.t2 are isoforms of gene g1). We need to:
+
+1. Extract the gene-level ID
+2. Match it to the count matrix format (with `aip_` prefix)
+3. Deduplicate to one annotation per gene 
+
+## 7.1 Parse Aiptasia annotations
+```{r prepare-annotations}
+# Step 1: Extract gene ID from Protein_ID
+aip_annotate <- aip_annotate %>%
+  mutate(gene_id = paste0("aip_", sub("\\..*$", "", Protein_ID)))
+aip_annotate_full<-aip_annotate
+
+# Step 2: Extract a short protein name from the SwissProt BLAST hit column
+aip_annotate <- aip_annotate %>%
+  mutate(protein_name = str_extract(`BLAST_hit..SwissProt.`, "(?<=\\|)[^|]+(?=_)"))
+
+# Step 3: Deduplicate — keep one row per gene_id
+# aip_annotate <- aip_annotate %>%
+#   group_by(gene_id) %>%
+#   slice_min(`E.value..SwissProt.`, n = 1, with_ties = FALSE, na.rm=T) %>%
+#   ungroup()
+
+aip_annotate <- aip_annotate %>%
+  group_by(gene_id) %>%
+  slice_min(`E.value..SwissProt.`, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+# Step 4: Select key columns for the final annotation table: gene_id, protein_name, BLAST description, GO terms, KEGG_ID
+aip_annotate <- aip_annotate %>%
+  dplyr::select(gene_id, protein_name, Protein_ID,
+         starts_with("Hit_description"),
+         starts_with("GO_"),
+         KEGG_ID)
+
+
+length(unique(aip_annotate$gene_id))
+
+#Step 5: Save annotation file 
+write.csv(aip_annotate, file = file.path(path.out,"aip_annotate.csv"))
+```
+
+## 7.2 Parse Bacterial Annotations from GFF3
+
+The three bacterial genomes were annotated with [Bakta](https://github.com/oschwengers/bakta). The GFF3 files contain rich `Name=` (product), `gene=`, `KEGG:`, and `COG:` fields in the attributes column. We parse CDS features to build annotation tables matching the count matrix gene IDs (`lab_AODPDA_XXXXX`, `rue_LDIBIJ_XXXXX`, `vib_BPEJFA_XXXXX`).
+
+```{r parse-bacterial-gff3}
+parse_bakta_gff3 <- function(gff3_path, prefix) {
+  lines <- readLines(gff3_path)
+  lines <- lines[!grepl("^#", lines) & nchar(lines) > 0]
+
+  gff <- read.delim(textConnection(lines), header = FALSE,
+                    col.names = c("seqid","source","type","start","end",
+                                  "score","strand","phase","attributes"))
+
+  gff_cds <- gff %>% filter(type == "CDS")
+
+  gff_cds <- gff_cds %>%
+    mutate(
+      locus_tag  = str_extract(attributes, "(?<=locus_tag=)[^;]+"),
+      gene_name  = str_extract(attributes, "(?<=;gene=|^gene=)[^;]+"),
+      product    = str_extract(attributes, "(?<=Name=)[^;]+") %>% URLdecode(),
+      kegg       = str_extract(attributes, "(?<=KEGG:)[^,;]+"),
+      cog_id     = str_extract(attributes, "(?<=COG:COG)\\d+") %>%
+                     {ifelse(is.na(.), NA, paste0("COG", .))},
+      go_terms   = str_extract(attributes, "(?<=Dbxref=).*") %>%
+                     str_extract_all("GO:\\d+") %>%
+                     sapply(function(x) paste(x, collapse = ";"))
+    ) %>%
+    mutate(
+      gene_id = paste0(prefix, "_", locus_tag),
+      go_terms = ifelse(go_terms == "", NA, go_terms)
+    ) %>%
+    dplyr::select(gene_id, locus_tag, gene_name, product, kegg, cog_id, go_terms) %>%
+    distinct(gene_id, .keep_all = TRUE)
+
+  return(gff_cds)
+}
+
+annot_lab <- parse_bakta_gff3(file.path(path.in,"labrenzia.gff3"), "lab")
+annot_rue <- parse_bakta_gff3(file.path(path.in,"ruegeria.gff3"),  "rue")
+annot_vib <- parse_bakta_gff3(file.path(path.in,"vibrio.gff3"), "vib")
+
+annot_bact <- bind_rows(
+  annot_lab %>% mutate(organism = "Labrenzia"),
+  annot_rue %>% mutate(organism = "Ruegeria"),
+  annot_vib %>% mutate(organism = "Vibrio")
+)
+
+cat("Labrenzia:", nrow(annot_lab), "CDS,", sum(!is.na(annot_lab$gene_name)), "with gene names,",
+    sum(!is.na(annot_lab$kegg)), "with KEGG\n")
+cat("Ruegeria:", nrow(annot_rue), "CDS,", sum(!is.na(annot_rue$gene_name)), "with gene names,",
+    sum(!is.na(annot_rue$kegg)), "with KEGG\n")
+cat("Vibrio:", nrow(annot_vib), "CDS,", sum(!is.na(annot_vib$gene_name)), "with gene names,",
+    sum(!is.na(annot_vib$kegg)), "with KEGG\n")
+
+#save annotation file
+write.csv(annot_bact, file = file.path(path.out,'annot_bact.csv'))
+```
+
+## 7.3 Parse Symbiont Annotations from Combined GTF
+
+The *Symbiodiniaceae* genes in the combined GTF have `gene` and `product` attributes on transcript lines. We extract one annotation per gene_id.
+
+```{r parse-symbiont-gtf}
+gtf_lines <- readLines(file.path(path.in,"combined_annotation.gtf"))
+sym_transcript_lines <- gtf_lines[grepl("^sym_", gtf_lines) & grepl("\\ttranscript\\t", gtf_lines)]
+
+annot_sym <- data.frame(raw = sym_transcript_lines, stringsAsFactors = FALSE) %>%
+  mutate(
+    gene_id   = str_extract(raw, 'gene_id "([^"]+)"', group = 1),
+    gene_name = str_extract(raw, 'gene "([^"]+)"', group = 1),
+    product   = str_extract(raw, 'product "([^"]+)"', group = 1)
+  ) %>%
+  dplyr::select(-raw) %>%
+  filter(!is.na(gene_id)) %>%
+  distinct(gene_id, .keep_all = TRUE)
+
+# Create a label column: prefer gene_name, then non-hypothetical product, then gene_id
+annot_sym <- annot_sym %>%
+  mutate(label = case_when(
+    !is.na(gene_name) ~ gene_name,
+    !is.na(product) & product != "hypothetical protein" ~ str_trunc(product, 40),
+    TRUE ~ gene_id
+  ))
+
+cat("Symbiont:", nrow(annot_sym), "genes,",
+    sum(!is.na(annot_sym$gene_name)), "with gene names,",
+    sum(!is.na(annot_sym$product) & annot_sym$product != "hypothetical protein"),
+    "with non-hypothetical products\n")
+
+#save annotation file 
+write.csv(annot_sym, file = file.path(path.out,'annot_sym.csv'))
+```
+
+# 8. Save data
+
+```{r}
+save(list=c('aip_annotate', 'counts_aip', 'colData'),file = file.path(path.out,'host_data.RData'))
+```
+
+```{r session-info}
+sessionInfo()
+```
+

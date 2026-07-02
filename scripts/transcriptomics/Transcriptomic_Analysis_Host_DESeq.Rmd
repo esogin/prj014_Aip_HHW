@@ -1,0 +1,680 @@
+---
+title: "Transcriptomic Analysis - Host DESeq2"
+author: "Maggie Sogin"
+date: "2026-07-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,           # Show code in the output
+  warning = FALSE,       # Hide warning messages
+  message = FALSE,       # Hide package loading messages
+  fig.width = 10,        # Default figure width (inches)
+  fig.height = 6,        # Default figure height (inches)
+  fig.align = "center"   # Center all figures
+)
+```
+
+# 1. Load Libraries & Define Constants
+
+```{r load-libraries}
+library(readxl)
+library(tidyverse)
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(matrixStats)
+library(ggrepel)
+library(patchwork)
+library(UpSetR)
+library(stringr)
+library(topGO)
+library(vegan)
+library(dplyr)
+library("RColorBrewer")
+library(scales)
+```
+
+```{r define-constants}
+palette <- c(
+  "FASW" = 'grey60',
+  "ABS"     = 'black',
+  "Labrenzia"    = '#A6CEE3',
+  "Ruegeria"    = '#1F78B4',
+  "Vibrio"    = '#B2DF8A',
+  "multi"  = 'violet')
+treatment_levels <- c(
+  "control" = "FASW", 
+  "ABS" = "ABS", 
+  "ISOA" = "Labrenzia", 
+  "ISOB" = "Ruegeria", 
+  "ISOC" = "Vibrio", 
+  "ISOABC" = "multi")
+
+path.out<-"../../output/transcriptomics"
+```
+
+# 2. Load All Data Files
+
+```{r}
+#load data
+load(file.path(path.out,'host_data.RData'))
+ls()
+```
+
+
+# 3. DESeq2 Analysis — Host (*Aiptasia*)
+
+Host differential expression analysis using DESeq2. DESeq2 models RNA-seq count data using a negative binomial distribution, accounts for library size differences between samples, and uses shrinkage to produce more reliable fold-change estimates.
+
+The design should include three terms: timepoint, teratment and treatment:timepoint interaction
+
+## 3.1 Create DESeq object, filter data and run LRT test
+
+https://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#countmat
+As per recommendations in Interactions section: 
+
+```{r specify models and generate DESeq Object}
+dds_aip <- DESeqDataSetFromMatrix(
+  countData = counts_aip,
+  colData = colData,
+  design = ~ timepoint*treatment)
+
+cat(nrow(dds_aip), "genes before filtering\n")
+keep <- rowSums(counts(dds_aip) >= 10) >= 4
+dds_aip <- dds_aip[keep, ]
+cat(nrow(dds_aip), "genes after filtering\n")
+#removes genes that don't have at least 10 counts in at least 4 samples, this helps to reduced noise in analysis 
+```
+
+## 3.2 Run DESeq analysis 
+want to look at differences in gene expression at each time-point across treatment groups
+```{r}
+ds<-DESeq(dds_aip)
+plotDispEsts(ds)
+# Dispersion plot looks good: trend line decreases smoothly, gene-wise estimates converge (black dots)
+```
+
+
+## 3.3 Exploratory plots
+
+### VST Transformation
+
+```{r vst-aip}
+vsd_aip <- vst(dds_aip, blind = TRUE)
+```
+
+### PCA — All Samples
+```{r pca-aip-all}
+pca_data <- plotPCA(vsd_aip, intgroup = c("treatment", "timepoint"), returnData = TRUE)
+percent_var <- round(100 * attr(pca_data, "percentVar"))
+
+p <- ggplot(pca_data, aes(x = PC1, y = PC2, color = treatment, shape = timepoint)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = palette) +
+  theme_bw() +
+  labs(x = paste0("PC1: ", percent_var[1], "% variance"),
+       y = paste0("PC2: ", percent_var[2], "% variance"),
+       title = "PCA — Aiptasia")
+p
+ggsave(file.path(path.out,"pca_host_all.pdf"), p, width = 7, height = 5)
+# Timepoint is the dominant source of variation, although controls at 1dpi cluster with all 21dpi, suggesting variation largely due to ABS influence
+```
+Impacts of the antibiotics is negligble at day 21
+
+```{r PERMANOVA}
+# get VST matrix (samples as rows)
+vsd_mat <- t(assay(vsd_aip))
+
+# pull metadata
+meta <- as.data.frame(colData(vsd_aip))
+
+# run PERMANOVA
+perm_res <- adonis2(vsd_mat ~ treatment+timepoint,
+                    data = meta,
+                    method = "euclidean",
+                    permutations = 999,
+                    by="terms")
+perm_res
+```
+Significant effect of time but not treatment on expression profiles
+Suggests that expression differences are related to ABS exposure and not to microbial inoculations. 
+
+### Sampel to Sample distance matrix
+```{r}
+sampleDists <- dist(vsd_mat)
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(vsd_aip$timepoint, vsd_aip$treatment, sep="-")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+```
+
+### Gene expression maps 
+```{r}
+timepoint_label="1dpi"
+
+#get mat and transform to z-score
+mat<-assay(vsd_aip[, vsd_aip$timepoint == timepoint_label])
+mat_z<-t(scale(t(mat)))
+mat<-mat[complete.cases(mat_z),]
+
+title<-"gene expression heatmap"
+
+# Column annotation
+ann_col <- data.frame(
+    Treatment = vsd_aip[, vsd_aip$timepoint == timepoint_label]$treatment,
+    row.names = colnames(mat_z))
+
+#row annotations
+row_lab <- aip_annotate$protein_name[match(rownames(mat_z), aip_annotate$gene_id)]
+
+p <- pheatmap(mat_z,
+    annotation_col = ann_col,
+    annotation_colors = list(
+    Treatment = palette),
+    show_rownames = F,
+    show_colnames = F,
+    labels_row = row_lab,
+    fontsize_row = 5.5,
+    cutree_rows = 3,
+    cutree_cols = 4,
+    main = title,
+    silent = TRUE)
+grid::grid.newpage(); grid::grid.draw(p$gtable)
+```
+
+## 3.4 Contrasts
+### 1dpi
+```{r 1 dpi contrasts}
+tp<-'1dpi'
+dds_aip_1dpi <- ds[, ds$timepoint == tp]
+dds_aip_1dpi$timepoint <- droplevels(dds_aip_1dpi$timepoint)
+design(dds_aip_1dpi) <- ~ treatment
+dds_aip_1dpi$treatment <- relevel(dds_aip_1dpi$treatment, ref = "ABS")
+dds_aip_1dpi <- DESeq(dds_aip_1dpi)  # re-run after releveling
+
+resultsNames(dds_aip_1dpi)
+
+#contrasts
+res_aip_1dpi_control <- results(dds_aip_1dpi, name = "treatment_FASW_vs_ABS")
+res_aip_1dpi_ISOA <- results(dds_aip_1dpi, name = "treatment_Labrenzia_vs_ABS")
+res_aip_1dpi_ISOB <- results(dds_aip_1dpi, name = "treatment_Ruegeria_vs_ABS")
+res_aip_1dpi_ISOC <- results(dds_aip_1dpi, name = "treatment_Vibrio_vs_ABS")
+res_aip_1dpi_ISOABC <- results(dds_aip_1dpi, name = "treatment_multi_vs_ABS")
+
+#contrasts with lfcShring
+res_aip_1dpi_control_shrunk <- lfcShrink(dds_aip_1dpi, coef = "treatment_FASW_vs_ABS", res = res_aip_1dpi_control,type = "apeglm")
+
+res_aip_1dpi_ISOA_shrunk <- lfcShrink(dds_aip_1dpi, coef = "treatment_Labrenzia_vs_ABS", res = res_aip_1dpi_ISOA,type = "apeglm")
+
+res_aip_1dpi_ISOB_shrunk <- lfcShrink(dds_aip_1dpi, coef = "treatment_Ruegeria_vs_ABS", res = res_aip_1dpi_ISOB,type = "apeglm")
+
+res_aip_1dpi_ISOC_shrunk <- lfcShrink(dds_aip_1dpi, coef = "treatment_Vibrio_vs_ABS", res = res_aip_1dpi_ISOC,type = "apeglm")
+
+res_aip_1dpi_ISOABC_shrunk <- lfcShrink(dds_aip_1dpi, coef = "treatment_multi_vs_ABS", res = res_aip_1dpi_ISOABC,type = "apeglm")
+```
+
+### 21 dpi
+```{r 21 dpi contasts}
+tp<-'21dpi'
+dds_aip_21dpi <- ds[, ds$timepoint == tp]
+dds_aip_21dpi$timepoint <- droplevels(dds_aip_21dpi$timepoint)
+design(dds_aip_21dpi) <- ~ treatment
+dds_aip_21dpi$treatment <- relevel(dds_aip_21dpi$treatment, ref = "ABS")
+dds_aip_21dpi <- DESeq(dds_aip_21dpi)  # re-run after releveling
+
+resultsNames(dds_aip_21dpi)
+
+#contrasts
+res_aip_21dpi_control <- results(dds_aip_21dpi, name = "treatment_FASW_vs_ABS")
+res_aip_21dpi_ISOA <- results(dds_aip_21dpi, name = "treatment_Labrenzia_vs_ABS")
+res_aip_21dpi_ISOB <- results(dds_aip_21dpi, name = "treatment_Ruegeria_vs_ABS")
+res_aip_21dpi_ISOC <- results(dds_aip_21dpi, name = "treatment_Vibrio_vs_ABS")
+res_aip_21dpi_ISOABC <- results(dds_aip_21dpi, name = "treatment_multi_vs_ABS")
+
+#contrasts with lfcShring
+res_aip_21dpi_control_shrunk <- lfcShrink(dds_aip_21dpi, coef = "treatment_FASW_vs_ABS", res = res_aip_21dpi_control,type = "apeglm")
+
+res_aip_21dpi_ISOA_shrunk <- lfcShrink(dds_aip_21dpi, coef = "treatment_Labrenzia_vs_ABS", res = res_aip_21dpi_ISOA,type = "apeglm")
+
+res_aip_21dpi_ISOB_shrunk <- lfcShrink(dds_aip_21dpi, coef = "treatment_Ruegeria_vs_ABS", res = res_aip_21dpi_ISOB,type = "apeglm")
+
+res_aip_21dpi_ISOC_shrunk <- lfcShrink(dds_aip_21dpi, coef = "treatment_Vibrio_vs_ABS", res = res_aip_21dpi_ISOC,type = "apeglm")
+
+res_aip_21dpi_ISOABC_shrunk <- lfcShrink(dds_aip_21dpi, coef = "treatment_multi_vs_ABS", res = res_aip_21dpi_ISOABC,type = "apeglm")
+```
+
+## 3.5 DEGs Tables with annotations
+GO IDs are swissprot annotations, also included KEGG IDs
+
+```{r - define function to make table}
+make_deg_table <- function(comp_data, comparison, timepoint, annotation_table = aip_annotate) {
+  res <- data.frame(comp_data) %>%
+    filter(padj < 0.05) %>% #change if needed
+    rownames_to_column(var = "gene_id") %>%
+    left_join(annotation_table, by = "gene_id") %>%
+     mutate(comp = comparison, timepoint=timepoint) #%>%
+    # mutate(
+    #   'go_ids'=GO_IDs..SwissProt., 
+    #   'go_cat'=GO_categories..SwissProt., 
+    #   'go_bp'=GO_BP..SwissProt.,
+    #   'go_mf'=GO_MF..SwissProt.,
+    #   'go_cc'=GO_CC..SwissProt.,
+    #   'description'=Hit_description..SwissProt.) %>% 
+    # dplyr::select(
+    #   gene_id, comp,timepoint, baseMean, log2FoldChange, lfcSE, padj,
+    #   protein_name, go_ids, description,go_cat,
+    #   go_bp, go_mf, go_cc, KEGG_ID
+    # )
+  return(res)
+}
+```
+
+###1 dpi
+```{r}
+deg_set_fasw_v_abs_1dpi<-make_deg_table(res_aip_1dpi_control_shrunk,'FASW_vs_ABS','1dpi',aip_annotate)
+deg_set_lab_v_abs_1dpi<-make_deg_table(res_aip_1dpi_ISOA_shrunk,'Labrenzia_vs_ABS','1dpi',aip_annotate)
+deg_set_reu_v_abs_1dpi<-make_deg_table(res_aip_1dpi_ISOB_shrunk,'Reugeria_vs_ABS','1dpi',aip_annotate)
+deg_set_vib_v_abs_1dpi<-make_deg_table(res_aip_1dpi_ISOC_shrunk,'Vibrio_vs_ABS','1dpi',aip_annotate)
+deg_set_multi_v_abs_1dpi<-make_deg_table(res_aip_1dpi_ISOABC_shrunk,'Multi_vs_ABS','1dpi',aip_annotate)
+
+#deg_set_lab_v_multi_1dpi<-make_deg_table(res_aip_1dpi_ISOA_vs_ISOABC,'Labrenzia_vs_multi','1dpi',aip_annotate)
+#deg_set_reu_v_multi_1dpi<-make_deg_table(res_aip_1dpi_ISOB_vs_ISOABC,'Reugeria_vs_multi','1dpi',aip_annotate)
+#deg_set_vib_v_multi_1dpi<-make_deg_table(res_aip_1dpi_ISOC_vs_ISOABC,'Vibrio_vs_multi','1dpi',aip_annotate)
+```
+
+### 21dpi
+```{r}
+deg_set_fasw_v_abs_21dpi<-make_deg_table(res_aip_21dpi_control_shrunk,'FASW_vs_ABS','21dpi',aip_annotate)
+deg_set_lab_v_abs_21dpi<-make_deg_table(res_aip_21dpi_ISOA_shrunk,'Labrenzia_vs_ABS','21dpi',aip_annotate)
+deg_set_reu_v_abs_21dpi<-make_deg_table(res_aip_21dpi_ISOB_shrunk,'Reugeria_vs_ABS','21dpi',aip_annotate)
+deg_set_vib_v_abs_21dpi<-make_deg_table(res_aip_21dpi_ISOC_shrunk,'Vibrio_vs_ABS','21dpi',aip_annotate)
+deg_set_multi_v_abs_21dpi<-make_deg_table(res_aip_21dpi_ISOABC_shrunk,'Multi_vs_ABS','21dpi',aip_annotate)
+
+#deg_set_lab_v_multi_21dpi<-make_deg_table(res_aip_21dpi_ISOA_vs_ISOABC,'Labrenzia_vs_multi','21dpi',aip_annotate)
+#deg_set_reu_v_multi_21dpi<-make_deg_table(res_aip_21dpi_ISOB_vs_ISOABC,'Reugeria_vs_multi','21dpi',aip_annotate)
+#deg_set_vib_v_multi_21dpi<-make_deg_table(res_aip_21dpi_ISOC_vs_ISOABC,'Vibrio_vs_multi','21dpi',aip_annotate)
+```
+
+```{r combine deg tables}
+deg_names <- ls(pattern = "^deg_set")
+deg_list <- mget(deg_names) #put dataframes into list 
+deg_list <- deg_list[!sapply(deg_list, is.null)]# Drop any NULLs
+deg_list <- deg_list[sapply(deg_list, nrow) > 0] # Drop any with 0 rows
+combined_deg <- bind_rows(deg_list, .id = "source")
+write.csv(combined_deg,file.path(path.out,'DEGs.csv'))
+combined_deg
+```
+
+```{r summary table}
+deg_summary<-combined_deg %>% group_by(comp, timepoint) %>% 
+  summarize(nr_DEGs=length(gene_id), up=sum(log2FoldChange>0),down=sum(log2FoldChange<0))
+deg_summary %>% arrange(timepoint,comp)
+```
+
+```{r}
+str(combined_deg %>% filter(!comp=="FASW_vs_ABS"))
+degs_of_interest<-combined_deg %>% filter(!comp=="FASW_vs_ABS")
+```
+
+
+## 3.6 Visualize Nr DEGs
+
+```{r}
+df<-combined_deg %>% separate(comp, into = c('treatment','base'), sep = "_vs_") %>% 
+  mutate(direction=ifelse(log2FoldChange>0,'up','down')) 
+
+ggplot(df, aes(x=treatment, y=log2FoldChange, color=direction)) + 
+  #geom_hline(yintercept = 1,linetype='dashed', color='gray')+
+  #geom_hline(yintercept = -1,linetype='dashed', color='gray')+
+  geom_jitter(height=0,width=0.1,alpha=0.5) + facet_grid(base~timepoint) + 
+  theme_bw() + xlab('Treatment vs. ABS') 
+```
+
+## 3.7 Heatmap of DEGs
+
+- Plot DEGs from each treatment (Labrenzia, Reugeria, Vibrio and Mult) vs ABS comparison 
+- Filter genes with padj < 0.05
+- we are not plotting DEGs bewteen ASW and FASW as these genes dominate expression differences in system 
+
+#### 1 dpi
+```{r}
+timepoint_label<-'1dpi'
+vsd<-vsd_aip
+
+sig_genes <- unique(c(
+  rownames(subset(as.data.frame(res_aip_1dpi_ISOA_shrunk), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_1dpi_ISOB_shrunk), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_1dpi_ISOC_shrunk), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_1dpi_ISOABC_shrunk), padj < 0.05))
+))
+
+#get mat and transform to z-score
+mat<-assay(vsd[, vsd$timepoint == timepoint_label])[sig_genes, ] 
+mat_z<-t(scale(t(mat)))
+mat<-mat[complete.cases(mat_z),]
+
+title<-cat(timepoint_label, "union DEGs:", length(sig_genes), "->", nrow(mat_z), "plotted\n")
+
+# Column annotation
+ann_col <- data.frame(
+    Treatment = vsd[, vsd$timepoint == timepoint_label]$treatment,
+    row.names = colnames(mat_z))
+
+#row annotations
+row_lab <- aip_annotate$protein_name[match(rownames(mat_z), aip_annotate$gene_id)]
+
+p <- pheatmap(mat_z,
+    annotation_col = ann_col,
+    annotation_colors = list(
+    Treatment = palette),
+    show_rownames = TRUE,
+    show_colnames = F,
+    labels_row = row_lab,
+    fontsize_row = 5.5,
+    #kmeans_k=3,
+    cutree_rows = 3,
+    cutree_cols = 4,
+    main = paste0("DEGs, Aiptasia ", timepoint_label,
+                  " (", nrow(mat_z), " genes), Z-score"),
+    silent = TRUE)
+grid::grid.newpage(); grid::grid.draw(p$gtable)
+```
+```{r}
+tmp<-aip_annotate %>% filter(gene_id %in% sig_genes)
+setdiff(sig_genes,tmp$gene_id)
+```
+
+extract genes that are up and down regulated with vibrio cluster 
+```{r}
+# Extract cluster assignments for each gene
+cluster_assignments <- cutree(p$tree_row, k = 3)  # match k to cutree_rows above
+
+# View which cluster each gene belongs to
+head(cluster_assignments)
+
+# Pull out genes from a specific cluster (e.g. cluster 2)
+cluster1_genes <- names(cluster_assignments[cluster_assignments == 1])
+cluster2_genes <- names(cluster_assignments[cluster_assignments == 2])
+cluster3_genes <- names(cluster_assignments[cluster_assignments == 3])
+```
+
+#### 21 dpi
+```{r}
+timepoint_label<-'21dpi'
+vsd<-vsd_aip
+
+sig_genes <- unique(c(
+  rownames(subset(as.data.frame(res_aip_21dpi_ISOA), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_21dpi_ISOB), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_21dpi_ISOC), padj < 0.05)),
+  rownames(subset(as.data.frame(res_aip_21dpi_ISOABC), padj < 0.05))
+))
+
+#get mat and transform to z-score
+mat<-assay(vsd[, vsd$timepoint == timepoint_label])[sig_genes, ] 
+mat_z<-t(scale(t(mat)))
+mat<-mat[complete.cases(mat_z),]
+
+title<-cat(timepoint_label, "union DEGs:", length(sig_genes), "->", nrow(mat_z), "plotted\n")
+
+# Column annotation
+ann_col <- data.frame(
+    Treatment = vsd[, vsd$timepoint == timepoint_label]$treatment,
+    row.names = colnames(mat_z))
+
+#row annotations
+row_lab <- aip_annotate$protein_name[match(rownames(mat_z), aip_annotate$gene_id)]
+
+p <- pheatmap(mat_z,
+    annotation_col = ann_col,
+    annotation_colors = list(
+    Treatment = palette),
+    show_rownames = TRUE,
+    show_colnames = F,
+    labels_row = row_lab,
+    fontsize_row = 5.5,
+    cutree_rows = 2,
+    cutree_cols = 2,
+    main = paste0("DEGs, Aiptasia ", timepoint_label,
+                  " (", nrow(mat_z), " genes), Z-score"),
+    silent = TRUE)
+grid::grid.newpage(); grid::grid.draw(p$gtable)
+```
+
+## 3.8 Gene Expression Patterns
+
+```{r}
+deg_df <- degs_of_interest %>% 
+          dplyr::select(gene_id,protein_name,Protein_ID,
+                        Hit_description..SwissProt.,GO_IDs..SwissProt.,
+                        GO_categories..SwissProt.,GO_BP..SwissProt.,
+                        KEGG_ID) %>% 
+          distinct(gene_id, .keep_all = TRUE)
+length(unique(degs_of_interest$gene_id))
+length(deg_df$gene_id)
+
+
+head(deg_df)
+write.csv(deg_df,'~/Desktop/tmp.csv')
+```
+
+GO metabolic processes defined below:
+```{r}
+category_keywords<-list(
+  "immune system" = c("inflammatory","toll","go:0006954","myd88","immune","cy24b","mfsd6"), #GO term for inflation
+  "carbohydrate metabolism" = c(),
+  "DNA / RNA metabolic processes"  = c("imdh1","pax3","meox1","klf5"),
+  "lipid metabolism" = c("go:0006629","go:0120020", "cholesterol","go:0030301","fat3"),
+  "cell cycle" = c('adip'),
+  "cell proliferation"  = c('brsk2',"go:0051301","fbln4"),
+  "catabolic processes" = c('al1a1','tmps9',"mocos",'cah2','cp3ao','netr'), #double check these genes here 
+  "signaling" = c("wnt4a","go:0007166","vwde","epha1", "prkx",
+                  'aakg2','torso','par16','agrv1',"ctnl1",
+                  'fgr1a','ack1','tm198','opsd1','brs4','PIRL'), #and gene regulation
+  "stress response" = c("hbap1", "heat shock",'yl89'), #yl89 resonse to AA starvation
+  "transporter activity" = c("go:0003333","go:0055085",'mot3','sup9'), #go terms for transprot
+  "toxin" = c("phospholipase a2"),
+  "metal ion binding"  = c("frrs1","egtb","cp3A0","obl"),
+  "programmed cell death" = c('f162a'),
+  "symbiosis"=c("sant"),
+  "membrane transport" = c('trpl', 'trpc6')
+  )
+```
+
+```{r assign categories}
+assign_category <- function(text, keyword_list) {
+  # catch true blanks, NA, and the "NA | | |" artifact from pasting NA protein_name
+  if (is.na(text) || str_trim(text) == "" || str_trim(gsub("\\||NA", "", text)) == "") {
+    return("Unknown")
+  }
+  text <- tolower(text)
+  hits <- names(keyword_list)[sapply(keyword_list, function(kw) {
+    kw <- kw[kw != "" & !is.na(kw)]
+    if (length(kw) == 0) return(FALSE)
+    any(str_detect(text, kw))
+  })]
+  
+  if (length(hits) == 0) return("Other/Uncategorized")
+  if (length(hits) > 1) return(paste(hits, collapse = "; "))
+  hits
+}
+
+deg_df_annot <- deg_df %>%
+  mutate(search_text = paste(protein_name, Hit_description..SwissProt., GO_categories..SwissProt.,sep = " | "),
+         category = sapply(search_text, assign_category, keyword_list = category_keywords))
+
+```
+```{r}
+#manual adjust some entries 
+manual_overrides <- tribble(
+  ~gene_id,      ~category,   ~override_reason,
+  "aip_g1487",  "signaling",  "TrEMBL annotation Notch signaling pathway",
+  "aip_g24879", "catabolic processes", "TrEMBL annotation oxidoreductase activity [GO:0016627]",
+  "aip_g24878",  "Unknown",             "WAPA -- bacterial toxin-antitoxin gene (B. subtilis), likely spurious/low-confidence BLAST hit, not trustworthy for host functional classification")
+  
+
+# apply overrides on top of automatic keyword-based category
+deg_df_annot <- deg_df_annot %>%
+  left_join(manual_overrides, by = "gene_id", suffix = c("_auto", "")) %>%
+  mutate(
+    category_final = coalesce(category, category_auto),  # override wins if present, else keep automatic
+    was_overridden = !is.na(category)
+  ) %>%
+  select(-category) %>%
+  rename(category_auto = category_auto, category = category_final)
+
+#summary
+table(deg_df_annot$category)
+```
+
+```{r}
+tmp<-degs_of_interest %>% filter(category == "Other/Uncategorized") 
+#write.csv(tmp,'~/Desktop/tmp_uncat_full.csv')
+```
+
+###Generate plots
+
+```{r - boxplot option}
+#get counts
+ds_sf<- estimateSizeFactors(ds)
+norm_counts <- counts(ds_sf, normalized = TRUE)
+
+deg_ids <- deg_df_annot %>% pull(gene_id) %>% unique()
+norm_sub <- norm_counts[rownames(norm_counts) %in% deg_ids, , drop = FALSE]
+
+#get metadata
+sample_meta <- as.data.frame(colData(ds_sf)) %>%
+  mutate(sample = rownames(colData(ds_sf))) %>%
+  select(sample, treatment, timepoint)
+
+#get means and se for each gene
+expr_df <- as.data.frame(norm_sub) %>%
+  rownames_to_column("gene_id") %>%
+  pivot_longer(-gene_id, names_to = "sample", values_to = "norm_expr") %>%
+  left_join(sample_meta, by = "sample") %>% 
+  group_by(gene_id, treatment, timepoint) %>% 
+  summarize(
+    mean_avg = mean(norm_expr),
+    se       = sd(norm_expr) / sqrt(n()),
+    sample_size = n(),
+    .groups = "drop"
+  )
+
+# pull ABS mean per gene x timepoint as the baseline to divide by
+abs_means <- expr_df %>%
+  filter(treatment == "ABS") %>%
+  select(gene_id, timepoint, abs_mean = mean_avg)
+
+# compute relative mean + relative SE
+expr_rel_df <- expr_df %>%
+  left_join(abs_means, by = c("gene_id", "timepoint")) %>%
+  mutate(
+    rel_mean = mean_avg / abs_mean,
+    rel_se   = se / abs_mean
+  )
+
+# check for zero/near-zero ABS baselines -- these will produce Inf/NaN
+expr_rel_df %>% filter(is.infinite(rel_mean) | is.nan(rel_mean))
+
+# add categories
+gene_labels <- deg_df_annot %>%
+  select(gene_id, category, protein_name) %>%
+  distinct(gene_id, .keep_all = TRUE)
+
+expr_rel_plot <- expr_rel_df %>%
+  left_join(gene_labels, by = "gene_id") %>%
+  mutate(treatment = factor(treatment, levels = c("ABS", setdiff(unique(treatment), "ABS")))) %>% 
+  mutate(
+    gene_label  = if_else(is.na(protein_name) | protein_name == "", gene_id, protein_name)
+  )
+
+## plot
+# one timepoint at a time
+tp <- "1dpi"
+expr_rel_plot <- expr_rel_plot %>%
+  mutate(treatment = factor(treatment,
+                             levels = c("ABS", "FASW", "multi", "Labrenzia", "Ruegeria", "Vibrio")))
+
+
+p_rel_1 <- ggplot(expr_rel_plot %>% filter(timepoint == tp),
+                 aes(x = treatment, y = rel_mean, group = gene_id, color = gene_label)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey60", linewidth = 0.4) +
+  geom_line(linewidth = 0.8, position = position_dodge(width = 0.3)) +
+  geom_errorbar(aes(ymin = rel_mean - rel_se, ymax = rel_mean + rel_se),
+                width = 0.15, linewidth = 0.5, position = position_dodge(width = 0.3)) +
+  geom_point(size = 2, position = position_dodge(width = 0.3)) +
+  facet_wrap(~ category, scales = "free_y", ncol = 4) +
+  labs(x = NULL, y = "Expression relative to ABS (mean \u00b1 SE)", color = "Gene",
+       title = paste("DEG expression relative to ABS \u2014", tp)) +
+  theme_bw(base_size = 11) +
+  theme(strip.text = element_text(face = "bold", size = 9),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none",
+        legend.text = element_text(size = 8))
+
+p_rel_1
+
+```
+```{r}
+# one timepoint at a time
+tp <- "21dpi"
+
+p_rel_21 <- ggplot(expr_rel_plot %>% filter(timepoint == tp),
+                 aes(x = treatment, y = rel_mean, group = gene_id, color = gene_label)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey60", linewidth = 0.4) +
+  geom_line(linewidth = 0.8, position = position_dodge(width = 0.3)) +
+  geom_errorbar(aes(ymin = rel_mean - rel_se, ymax = rel_mean + rel_se),
+                width = 0.15, linewidth = 0.5, position = position_dodge(width = 0.3)) +
+  geom_point(size = 2, position = position_dodge(width = 0.3)) +
+  facet_wrap(~ category, scales = "free_y", ncol = 4) +
+  labs(x = NULL, y = "Expression relative to ABS (mean \u00b1 SE)", color = "Gene",
+       title = paste("DEG expression relative to ABS \u2014", tp)) +
+  theme_bw(base_size = 11) +
+  theme(strip.text = element_text(face = "bold", size = 9),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none",
+        legend.text = element_text(size = 8))
+
+p_rel_21
+```
+
+
+```{r}
+p_rel_both_tp <- ggplot(expr_rel_plot,
+                          aes(x = treatment, y = rel_mean,
+                              group = interaction(gene_id, timepoint),
+                              color = gene_label, shape = timepoint)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey60", linewidth = 0.4) +
+  geom_line(aes(linetype = timepoint), linewidth = 0.7,
+            position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = rel_mean - rel_se, ymax = rel_mean + rel_se),
+                width = 0.15, linewidth = 0.4,
+                position = position_dodge(width = 0.4)) +
+  geom_point(size = 2.5, position = position_dodge(width = 0.4)) +
+  facet_wrap(~ category, scales = "free_y", ncol = 4) +
+  scale_shape_manual(values = c("1dpi" = 16, "21dpi" = 17)) +   # filled circle vs triangle
+  labs(x = NULL, y = "Expression relative to ABS (mean \u00b1 SE)",
+       color = "Gene", shape = "Timepoint", linetype = "Timepoint",
+       title = "DEG expression relative to ABS \u2014 1dpi vs 21dpi") +
+  theme_bw(base_size = 11) +
+  theme(strip.text = element_text(face = "bold", size = 9),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none",
+        legend.text = element_text(size = 8))
+
+p_rel_both_tp
+```
+
+*some general conclusions here*
+1. Inoculation with specific bacteria depresses host expression of key immune genes, this isn't impacted by the multi species infection and disappears at day 21
+
+
+```{r session-info}
+sessionInfo()
+```
