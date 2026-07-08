@@ -496,10 +496,10 @@ grid::grid.newpage(); grid::grid.draw(p$gtable)
 
 ```{r}
 deg_df <- degs_of_interest %>% 
-          dplyr::select(gene_id,protein_name,Protein_ID,
-                        Hit_description..SwissProt.,GO_IDs..SwissProt.,
-                        GO_categories..SwissProt.,GO_BP..SwissProt.,
-                        KEGG_ID) %>% 
+          #dplyr::select(gene_id,protein_name,Protein_ID,
+          #             Hit_description..SwissProt.,GO_IDs..SwissProt.,
+          #              GO_categories..SwissProt.,GO_BP..SwissProt.,
+          #              KEGG_ID) %>% 
           distinct(gene_id, .keep_all = TRUE)
 length(unique(degs_of_interest$gene_id))
 length(deg_df$gene_id)
@@ -512,24 +512,28 @@ write.csv(deg_df,'~/Desktop/tmp.csv')
 GO metabolic processes defined below:
 ```{r}
 category_keywords<-list(
-  "immune system" = c("inflammatory","toll","go:0006954","myd88","immune","cy24b","mfsd6"), #GO term for inflation
-  "carbohydrate metabolism" = c(),
-  "DNA / RNA metabolic processes"  = c("imdh1","pax3","meox1","klf5"),
-  "lipid metabolism" = c("go:0006629","go:0120020", "cholesterol","go:0030301","fat3"),
-  "cell cycle" = c('adip'),
-  "cell proliferation"  = c('brsk2',"go:0051301","fbln4"),
-  "catabolic processes" = c('al1a1','tmps9',"mocos",'cah2','cp3ao','netr'), #double check these genes here 
-  "signaling" = c("wnt4a","go:0007166","vwde","epha1", "prkx",
-                  'aakg2','torso','par16','agrv1',"ctnl1",
-                  'fgr1a','ack1','tm198','opsd1','brs4','PIRL'), #and gene regulation
-  "stress response" = c("hbap1", "heat shock",'yl89'), #yl89 resonse to AA starvation
-  "transporter activity" = c("go:0003333","go:0055085",'mot3','sup9'), #go terms for transprot
-  "toxin" = c("phospholipase a2"),
-  "metal ion binding"  = c("frrs1","egtb","cp3A0","obl"),
-  "programmed cell death" = c('f162a'),
-  "symbiosis"=c("sant"),
-  "membrane transport" = c('trpl', 'trpc6')
+    "catabolic processes" = c('al1a1','tmps9','netr','mlrp2'), 
+    "cell cycle" = c('adip'),
+    "cell proliferation"  = c('brsk2'),
+    "extracellular matrix" = c("hmcn1","fbln4"),
+    "transcription factor" = c("pax3","meox1","klf5"),
+    "DNA / RNA metabolic processes" = c("imdh1"),
+    "immune system" = c("myd88","cy24b","mfsd6",'btn1'), 
+    "lipid metabolism" = c('star3','pa24a'),
+    "cell adhesion" = c('fat3','siba'),
+    "membrane transport" = c('trpl', 'trpc6'),
+    "metal ion binding"  = c("frrs1","egtb","obl",'cah2',"cp3ao"),
+    "programmed cell death" = c('f162a','qorx'),
+    "stress response" = c("hbap1", "heat shock",'yl89','par16'), #yl89 resonse to AA starvation
+    "sulfur metabolism" = c("mocos"),
+    "symbiosis"=c("sant"),
+    "toxin" = c("pa2"),
+    "transporter activity" = c('sup9'),
+    "signaling" = c('agrv1','epha1','torso','ack1','prkx','tm198','opsd1','ctnl1','brs4','wnt4a','vwde','gpc1','syt1'),
+    "carbohydrate metabolism" =c('aakg2'),
+    "mitocondria" = c('sir5','clu') #currently these are based on parsing from claude, need to check
   )
+
 ```
 
 ```{r assign categories}
@@ -562,7 +566,17 @@ manual_overrides <- tribble(
   ~gene_id,      ~category,   ~override_reason,
   "aip_g1487",  "signaling",  "TrEMBL annotation Notch signaling pathway",
   "aip_g24879", "catabolic processes", "TrEMBL annotation oxidoreductase activity [GO:0016627]",
-  "aip_g24878",  "Unknown",             "WAPA -- bacterial toxin-antitoxin gene (B. subtilis)")
+  "aip_g24878",  "Unknown",             "WAPA -- bacterial toxin-antitoxin gene (B. subtilis)",
+  "aip_g14281", "immune system", "TrEMBL annotation potentially as Spaetzle domain-containing protein which has role in innate immunity in inverts",
+  "aip_g24879", 'lipid metabolism', "TrEMBL description Acyl-CoA dehydrogenase family member 11",
+ "aip_g11751", "toxin", "TrEMBL annotation ShKT domain-containing protein, known toxin in sea anemones",
+ "aip_g14929","transcription factor", "TrEMBL annotation as C2H2-type domain-containing protein, which are common transcription factors",
+ "aip_g18319", "signaling","TrEMBL annotation as G-protein coupled receptors family 1 profile domain-containing protein",
+ "aip_g27973", "transcription factor", "TrEMBL annotation as C2H2-type domain-containing protein, which are common transcription factors",
+ "aip_g1487", "signaling", "TrEMBL annotation as PHD-type domain-containing protein, which is involved in notch singaling pathways",
+ 'aip_g30400',"lipid metabolism","getting cought in mlutiple categories",
+ 'aip_g17902','toxin',"getting cought in mlutiple categories"
+  )
   
 
 # apply overrides on top of automatic keyword-based category
@@ -576,12 +590,12 @@ deg_df_annot2 <- deg_df_annot %>%
   dplyr::rename(category_auto = category_auto, category = category_final)
 
 #summary
-table(deg_df_annot$category)
+table(deg_df_annot2$category)
 ```
 
 ```{r}
-#tmp<-degs_of_interest %>% filter(category == "Other/Uncategorized") 
-#write.csv(tmp,'~/Desktop/tmp_uncat_full.csv')
+tmp<-deg_df_annot2 #%>% filter(category == "Other/Uncategorized") 
+write.csv(tmp,'~/Desktop/degs_annotated.csv')
 ```
 
 ###Generate plots
@@ -717,8 +731,63 @@ p_rel_both_tp <- ggplot(expr_rel_plot,
 p_rel_both_tp
 ```
 
+```{r}
+# grab the last treatment level's point for each gene, per facet
+end_labels <- expr_rel_plot %>%
+  filter(timepoint == tp) %>%
+  group_by(category, gene_id) %>%
+  filter(as.integer(treatment) == max(as.integer(treatment))) %>%
+  ungroup()
+
+p_rel_1 <- ggplot(expr_rel_plot %>% filter(timepoint == tp),
+                 aes(x = treatment, y = rel_mean, group = gene_id, color = gene_label)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey60", linewidth = 0.4) +
+  geom_line(linewidth = 0.8, position = position_dodge(width = 0.3)) +
+  geom_errorbar(aes(ymin = rel_mean - rel_se, ymax = rel_mean + rel_se),
+                width = 0.15, linewidth = 0.5, position = position_dodge(width = 0.3)) +
+  geom_point(size = 2, position = position_dodge(width = 0.3)) +
+  geom_text_repel(
+    data = end_labels,
+    aes(label = gene_label),
+    size = 3,
+    fontface = "bold",
+    direction = "y",
+    hjust = 0,
+    nudge_x = 0.4,
+    segment.size = 0.2,
+    segment.color = "grey50",
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+  scale_x_discrete(expand = expansion(mult = c(0.05, 0.35))) +  # leave room for labels
+  facet_wrap(~ category, scales = "free_y", ncol = 4) +
+  labs(x = NULL, y = "Expression relative to ABS (mean \u00b1 SE)", color = "Gene",
+       title = paste("DEG expression relative to ABS \u2014", tp)) +
+  theme_bw(base_size = 11) +
+  theme(strip.text = element_text(face = "bold", size = 9),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+p_rel_1
+```
+
+
+
 *some general conclusions here*
 1. Inoculation with specific bacteria depresses host expression of key immune genes, this isn't impacted by the multi species infection and disappears at day 21
+2. incoulation with reugeria induces gene expression for symbiosis related gene, not the same with Labrenzia or vibrio
+  - known symbiodinium - bacteria interactions, https://pmc.ncbi.nlm.nih.gov/articles/PMC11205819/, advances understanding of host control on symbiosis as well 
+
+There are some interesting patterns in gene expression: 
+
+1. genes that are overexprssed/underexpressed in all four bacterial treatments
+2. genes that are overexprssed/underexpressed in only the single bacterial inoculations 
+  - membrane transport (underexpressed)
+  - immune regulation (underexpressed)
+  - toxin production (underexpressed)
+  - metal binding (underexpressed)
+3. genes taht are overexprssed/underexpressed in only vibrio trt
+  - programmed cell death
+
 
 
 ```{r session-info}
