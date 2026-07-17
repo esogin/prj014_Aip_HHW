@@ -90,7 +90,7 @@ post_inoc_days <- c("1dpi", "2dpi", "4dpi", "7dpi", "14dpi", "21dpi")
 outlier_ct_cutoff <- 1.5   # cycles from median to flag outlier tech reps
 loq_cv_threshold  <- 0.35  # 35% Cq CV = LOQ threshold
 
-results_dir <- "../results/"
+results_dir <- "../../output/qPCR"
 if (!dir.exists(results_dir)) dir.create(results_dir, recursive = TRUE)
 ```
 
@@ -109,7 +109,7 @@ The three target genes are:
 **ef1a** (the *Aiptasia* housekeeping gene) is listed separately since it's the normalizer, not a target. The chunk prints a summary of how many plates were found per gene as a sanity check.
 
 ```{r gene-config}
-data_dir <- "../data/"
+data_dir <- "../../data/qPCR/"
 
 # ── Housekeeping gene ──
 ef1a_files <- list.files(paste0(data_dir, "ef1a"), pattern = "\\.xlsx?$",
@@ -1326,7 +1326,19 @@ for (g in target_names) {
   line_plots[[g]] <- p
   cat("\n\n")
 }
+
 ```
+```{r combine into multi panel plot}
+library(patchwork)
+dddl<-line_plots$dddL + ggtitle('Labrenzia') + guides(color='none') + ylab('Normalized Abundance')
+iso063<-line_plots$ISO163 + ggtitle('Reugeria') + guides(color='none') + ylab('')
+iso056<-line_plots$ISO056 + ggtitle('Vibrio') + theme(legend.position = 'right') + ylab('')
+
+dddl + iso063 + iso056 + plot_layout() 
+ggsave(file.path(results_dir,'qPCR_plot.svg'), height=4, width=12)
+```
+
+
 
 ## 7.2 Abundance Heatmaps
 
