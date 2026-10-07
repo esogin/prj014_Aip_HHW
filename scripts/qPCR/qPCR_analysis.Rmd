@@ -1330,7 +1330,7 @@ for (g in target_names) {
 ```
 ```{r combine into multi panel plot}
 library(patchwork)
-dddl<-line_plots$dddL + ggtitle('Labrenzia') + guides(color='none') + ylab('Normalized Abundance')
+dddl<-line_plots$dddL + ggtitle('Labrenzia') + guides(color='none') + ylab('Normalized Abundance (target / EF1a)')
 iso063<-line_plots$ISO163 + ggtitle('Reugeria') + guides(color='none') + ylab('')
 iso056<-line_plots$ISO056 + ggtitle('Vibrio') + theme(legend.position = 'right') + ylab('')
 

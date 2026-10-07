@@ -207,6 +207,128 @@ guide = guide_legend(reverse = TRUE)
 )
 n1
 ```
+```{r}
+# NMDS site scores + metadata
+nmds_scores <- vegan::scores(nmds.mod@ord, display = "sites") %>%
+  as.data.frame() %>%
+  rownames_to_column("sample_id") %>%
+  left_join(data.frame(sample_data(ps.analysis)) %>% rownames_to_column("sample_id"),
+            by = "sample_id") %>% 
+    mutate(dpi = factor(as.character(dpi), levels = c("0", "1", "4", "14", "21")))
+
+# range (min, max) and median of each axis per treatment x dpi
+nmds_ranges <- nmds_scores %>%
+  group_by(treatment, dpi) %>%
+  summarise(across(c(NMDS1, NMDS2),
+                   list(min = min, max = max, med = median)),
+            .groups = "drop") %>%
+  mutate(dpi = droplevels(dpi))
+
+# shared axis limits so the side bars line up with the ordination
+x_lims <- range(nmds_scores$NMDS1)
+y_lims <- range(nmds_scores$NMDS2)
+
+side_theme <- theme_bw() +
+  theme(panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank(),
+        legend.position = "none")
+
+# top bar: NMDS1 range, one row per dpi, dodged by treatment
+nmds1_bar <- ggplot(nmds_ranges, aes(y = dpi, color = treatment)) +
+  geom_linerange(aes(xmin = NMDS1_min, xmax = NMDS1_max),
+                 position = position_dodge(width = 0.8), linewidth = 0.8) +
+  #geom_point(aes(x = NMDS1_med), position = position_dodge(width = 0.8), size = 1.2) +
+  scale_color_manual(values = myPal) +
+  coord_cartesian(xlim = x_lims) +
+  labs(x = NULL, y = "dpi") +
+  side_theme +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_line(color = "gray90"),
+        panel.grid.major.y = element_blank())
+
+# right bar: NMDS2 range, one column per dpi, dodged by treatment
+nmds2_bar <- ggplot(nmds_ranges, aes(x = dpi, color = treatment)) +
+  geom_linerange(aes(ymin = NMDS2_min, ymax = NMDS2_max),
+                 position = position_dodge(width = 0.8), linewidth = 0.8) +
+ #geom_point(aes(y = NMDS2_med), position = position_dodge(width = 0.8), size = 1.2) +
+  scale_color_manual(values = myPal) +
+  coord_cartesian(ylim = y_lims) +
+  labs(x = "dpi", y = NULL) +
+  side_theme +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        panel.grid.major.y = element_line(color = "gray90"))
+
+# combine: side bars on top (NMDS1) and right (NMDS2)
+n1_sidebars <- nmds1_bar + plot_spacer() +
+  (n1 + coord_cartesian(xlim = x_lims, ylim = y_lims)) + nmds2_bar +
+  plot_layout(ncol = 2, widths = c(4, 1.2), heights = c(1.2, 4), guides = "collect")
+n1_sidebars
+```
+```{r}
+# NMDS site scores + metadata
+nmds_scores <- vegan::scores(nmds.mod@ord, display = "sites") %>%
+  as.data.frame() %>%
+  rownames_to_column("sample_id") %>%
+  left_join(data.frame(sample_data(ps.analysis)) %>% rownames_to_column("sample_id"),
+            by = "sample_id") %>%
+  mutate(dpi = factor(as.character(dpi), levels = c("0", "1", "4", "14", "21"),ordered=T),
+         treatment = factor(as.character(treatment), levels = names(myPal)))
+
+# range (min, max) of each axis per treatment x dpi
+nmds_ranges <- nmds_scores %>%
+  group_by(treatment, dpi) %>%
+  summarise(across(c(NMDS1, NMDS2), list(min = min, max = max)), .groups = "drop")
+
+# shared axis limits so the side bars line up with the ordination
+x_lims <- range(nmds_scores$NMDS1)
+y_lims <- range(nmds_scores$NMDS2)
+
+#dpi_strip <- c("0" = "0 dpi", "1" = "1 dpi", "4" = "4 dpi", "14" = "14 dpi", "21" = "21 dpi")
+
+side_theme <- theme_void() +
+  theme(legend.position = "none",
+        strip.text = element_text(size = 9, color = "gray30"),
+        panel.background = element_rect(fill = "gray97", color = NA),
+        panel.spacing = unit(2, "pt"))
+
+# top: NMDS1 range, one band per dpi (0 dpi at top), one line per treatment
+nmds1_bar <- ggplot(nmds_ranges, aes(y = fct_rev(treatment), color = treatment)) +
+  geom_linerange(aes(xmin = NMDS1_min, xmax = NMDS1_max),
+                 linewidth = 1.6, lineend = "round") +
+  facet_grid(dpi ~ ., scales = "free_y", space = "free_y", switch = "y") +
+  scale_color_manual(values = myPal) +
+  coord_cartesian(xlim = x_lims) +
+  side_theme +
+  theme(strip.text.y.left = element_text(angle = 0, hjust = 1),
+        strip.placement = "outside")
+
+# right: NMDS2 range, one band per dpi (0 dpi at left), one line per treatment
+nmds2_bar <- ggplot(nmds_ranges, aes(x = treatment, color = treatment)) +
+  geom_linerange(aes(ymin = NMDS2_min, ymax = NMDS2_max),
+                 linewidth = 1.6, lineend = "round") +
+  facet_grid(. ~ dpi, scales = "free_x", space = "free_x", switch = "x") +
+  scale_color_manual(values = myPal) +
+  coord_cartesian(ylim = y_lims) +
+  side_theme +
+  theme(strip.text.x.bottom = element_text(angle = 90, hjust = 1),
+        strip.placement = "outside")
+
+# main ordination: drop gridlines and the microViz caption, legend 0 -> 21 dpi
+n1_clean <- n1 +
+  coord_cartesian(xlim = x_lims, ylim = y_lims) +
+  guides(starshape = guide_legend(reverse = FALSE)) +
+  labs(caption = NULL) +
+  theme(panel.grid = element_blank())
+
+# combine: side bars on top (NMDS1) and right (NMDS2)
+n1_sidebars <- nmds1_bar + plot_spacer() + n1_clean + nmds2_bar +
+  plot_layout(ncol = 2, widths = c(4, 1), heights = c(1, 4), guides = "collect") &
+  theme(plot.margin = margin(2, 2, 2, 2))
+n1_sidebars
+```
+
+
+
 facet by timepoint
 
 ```{r}
@@ -289,10 +411,45 @@ d.pw <- vegdist(tmp.pw, method = 'bray')
 
 # Get metadata aligned to distance matrix sample order
 mdf.pw <- data.frame(sample_data(ps.analysis))
+mdf.pw$trt_dpi<-paste(mdf.pw$treatment, mdf.pw$dpi,sep="_")
 
 # Run pairwise PERMANOVA across treatment groups
-pw_results <- pairwise.adonis(d.pw, mdf.pw$treatment, p.adjust.m = "BH", perm = 999)
+pw_results <- pairwise.adonis(d.pw, mdf.pw$trt_dpi, p.adjust.m = "BH", perm = 999)
 pw_results %>% arrange(p.adjusted)
+view(pw_results)
+```
+
+#### Within-group variation (distance to centroid)
+Same approach as betadisper: each sample's Bray-Curtis distance to the centroid of its own treatment × dpi group. One value per sample, so no pseudo-replication from pairwise distances.
+```{r}
+bc_dist <- dist_get(nmds.mod)
+bc_meta <- data.frame(sample_data(ps.analysis)) %>%
+  rownames_to_column("sample_id") %>%
+  mutate(dpi = droplevels(dpi),
+         treatment = droplevels(treatment))
+
+# make sure metadata rows are in the same order as the distance matrix
+bc_meta <- bc_meta[match(labels(bc_dist), bc_meta$sample_id), ]
+bc_groups <- interaction(bc_meta$treatment, bc_meta$dpi, drop = TRUE)
+
+bd_trt_dpi <- betadisper(bc_dist, bc_groups, type = "centroid")
+
+bc_disp <- bc_meta %>%
+  mutate(dist_to_centroid = bd_trt_dpi$distances)
+
+permutest(bd_trt_dpi, permutations = 9999)
+```
+
+```{r}
+bc_disp_plot <- ggplot(bc_disp, aes(x = dpi, y = dist_to_centroid, fill = treatment, color = treatment)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA, position = position_dodge2(preserve = "single")) +
+  geom_jitter(position = position_dodge2(0.75, preserve = "single"), size = 1.5) +
+  scale_fill_manual(values = myPal) +
+  scale_color_manual(values = myPal) +
+  labs(x = "Days post inoculation", y = "Bray-Curtis distance\nto group centroid") +
+  theme_new +
+  theme(legend.title = element_blank())
+bc_disp_plot
 ```
 
 #### Comparison to null model 
@@ -313,9 +470,13 @@ fasw_ref_samples <- metadata %>%
   filter(treatment == "FASW", dpi == '0') %>%
   pull(sample_id)
 
+abs_ref_samples <- metadata %>%
+  filter(treatment == "ABS", dpi == '0') %>%
+  pull(sample_id)
+
 # 3. For each sample, calculate its mean BC distance to all FASW DPI 0
 mean_dist_to_ref <- bc_long %>%
-  filter(sample2 %in% fasw_ref_samples,  # only distances to reference samples
+  filter(sample2 %in% abs_ref_samples,  # only distances to reference samples
          sample1 != sample2) %>%          # exclude self-comparisons
   group_by(sample1) %>%
   summarise(mean_dist_to_fasw_dpi0 = mean(bray_dist), .groups = "drop")
@@ -823,7 +984,32 @@ bar
 library(patchwork)
 ```
 
-## Main Figure
+## Main Figures
+
+```{r}
+n1_sidebars
+ggsave(file.path(path.out,'Fig3.svg'),width=8, height=6,units = "in" )
+```
+
+```{r}
+diff_taxa 
+ggsave(file.path(path.out,'Fig4.svg'),width=10, height=8,units = "in" )
+```
+
+
+
+
+```{r}
+n1.2<-n1+ theme(axis.title = element_text(size=12))+ theme(legend.title = element_blank()) 
+
+n1.2  / diff_taxa +  plot_layout(nrow=2, widths=c(1,1.5)) + plot_annotation(tag_levels='A')
+
+n_s1 / diff_taxa
+
+ggsave(file.path(path.out,'Fig3.svg'),width=14, height=8,units = "in" )
+```
+
+
 
 ```{r}
 bcd.2<-bcd + theme(legend.position="none") + theme(axis.title = element_text(size=12)) + theme(legend.title  = element_blank())
@@ -832,7 +1018,7 @@ n1.2<-n1+ theme(axis.title = element_text(size=12))+ theme(legend.title = elemen
 
 (n1.2 + bcd.2) / diff_taxa +  plot_layout(nrow=2, widths=c(1,1)) + plot_annotation(tag_levels='A')
 
-ggsave(file.path(path.out,'FigX_16S.svg'),width=14, height=8,units = "in" )
+ggsave(file.path(path.out,'Fig3_16S.svg'),width=14, height=8,units = "in" )
 ```
 ```{r}
 bcd.2

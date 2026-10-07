@@ -371,7 +371,19 @@ degs_of_interest<-combined_deg %>% filter(!comp=="FASW_vs_ABS")
 ## 3.6 Visualize Nr DEGs
 
 ```{r}
-df <- combined_deg %>% 
+
+# 1. Genes that were differentially abundant in ABS vs FASW, per timepoint
+absfasw_degs <- combined_deg %>%
+  filter(comp == "FASW_vs_ABS", padj < 0.05) %>%   # adjust padj cutoff if needed
+  distinct(gene_id, timepoint)
+
+# 3. Remove those gene/timepoint combos from the full table
+df_filtered <- combined_deg %>%
+  anti_join(absfasw_degs, by = c("gene_id", "timepoint"))
+
+
+#1. get DEGs and label up and down 
+df <- df_filtered %>% 
   separate(comp, into = c('treatment','base'), sep = "_vs_") %>% 
   mutate(direction = case_when(
     log2FoldChange > 1  ~ 'up',
@@ -553,7 +565,23 @@ write.csv(deg_df,'~/Desktop/tmp.csv')
 
 GO metabolic processes defined below:
 ```{r}
+
+#categorize DEGs genes based on literature search terms
+#cat keywords here are annotation suggestions from EEH
 category_keywords<-list(
+  "immunity" = c("myd88","cy24b","mfsd6"),
+  "sensory/neuronal" = c('netr','syt1','opsd1','dhyc2'),
+  "oxylipin signaling" = c('trpl', 'trpc6'),
+  "stress response" = c("cp089",'hbap1'),
+  "mitocondria" = c('clu','sir5'),
+  "extracellular matrix" = c("hmcn1","fbln4"),
+  "growth and differentiation" = c('f162a','fgr1a'),
+  "signaling" = c('vwde')
+)
+
+
+
+old_category_keywords<-list(
     "catabolic processes" = c('al1a1','tmps9','netr','mlrp2'), 
     "cell cycle" = c('adip'),
     "cell proliferation"  = c('brsk2'),
@@ -596,7 +624,7 @@ assign_category <- function(text, keyword_list) {
 }
 
 deg_df_annot <- deg_df %>%
-  mutate(search_text = paste(protein_name, Hit_description..SwissProt., GO_categories..SwissProt.,sep = " | "),
+  mutate(search_text = protein_name,
          category = sapply(search_text, assign_category, keyword_list = category_keywords))
 
 ```
@@ -605,20 +633,20 @@ deg_df_annot <- deg_df %>%
 #manual adjust some entries 
 manual_overrides <- tribble(
   ~gene_id,      ~category,   ~override_reason,
-  "aip_g1487",  "signaling",  "TrEMBL annotation Notch signaling pathway",
-  "aip_g24879", "catabolic processes", "TrEMBL annotation oxidoreductase activity [GO:0016627]",
+#  "aip_g1487",  "signaling",  "TrEMBL annotation Notch signaling pathway",
+#  "aip_g24879", "catabolic processes", "TrEMBL annotation oxidoreductase activity [GO:0016627]",
   "aip_g24878",  "Unknown",             "WAPA -- bacterial toxin-antitoxin gene (B. subtilis)",
-  "aip_g14281", "immune system", "TrEMBL annotation potentially as Spaetzle domain-containing protein which has role in innate immunity in inverts",
-  "aip_g24879", 'lipid metabolism', "TrEMBL description Acyl-CoA dehydrogenase family member 11",
+#  "aip_g14281", "immunity", "TrEMBL annotation potentially as Spaetzle domain-containing protein which has role in innate immunity in inverts",
+#  "aip_g24879", 'lipid metabolism', "TrEMBL description Acyl-CoA dehydrogenase family member 11",
  "aip_g11751", "toxin", "TrEMBL annotation ShKT domain-containing protein, known toxin in sea anemones",
- "aip_g14929","transcription factor", "TrEMBL annotation as C2H2-type domain-containing protein, which are common transcription factors",
- "aip_g18319", "signaling","TrEMBL annotation as G-protein coupled receptors family 1 profile domain-containing protein",
- "aip_g27973", "transcription factor", "TrEMBL annotation as C2H2-type domain-containing protein, which are common transcription factors",
- "aip_g1487", "signaling", "TrEMBL annotation as PHD-type domain-containing protein, which is involved in notch singaling pathways",
- 'aip_g30400',"lipid metabolism","getting cought in mlutiple categories",
- 'aip_g17902','toxin',"getting cought in multiple categories",
- 'aip_g16369','transcription factor',"getting caught in multiple categories"
-  )
+# "aip_g14929","transcription factor", "TrEMBL annotation as C2H2-type domain-containing protein, which are common transcription factors",
+# "aip_g18319", "signaling","TrEMBL annotation as G-protein coupled receptors family 1 profile domain-containing protein",
+# "aip_g27973", "transcription factor", "TrEMBL annotation as C2H2-type domain-containing protein, which are common transcription factors",
+# "aip_g1487", "signaling", "TrEMBL annotation as PHD-type domain-containing protein, which is involved in notch singaling pathways",
+# 'aip_g30400',"lipid metabolism","getting cought in mlutiple categories",
+# 'aip_g17902','toxin',"getting cought in multiple categories",
+# 'aip_g16369','transcription factor',"getting caught in multiple categories"
+)
   
 
 # apply overrides on top of automatic keyword-based category
@@ -648,8 +676,8 @@ table(deg_df_annot2$category)
 ```
 
 ```{r}
-tmp<-deg_df_annot2 #%>% filter(category == "Other/Uncategorized") 
-write.csv(tmp,'~/Desktop/degs_annotated.csv')
+#tmp<-deg_df_annot2 #%>% filter(category == "Other/Uncategorized") 
+#write.csv(tmp,'~/Desktop/degs_annotated.csv')
 ```
 
 ###Generate plots
@@ -662,7 +690,11 @@ norm_counts <- counts(ds_sf, normalized = TRUE)
 #subset genes that have abs(log2foldchange >1)
 deg_df_annot2.lcfc2<-deg_df_annot2 %>% filter(abs(log2FoldChange) > 1)
 
-deg_ids <- deg_df_annot2.lcfc2 %>% pull(gene_id) %>% unique()
+#subset genes that have p value < 0.05 only, no l2fc differences
+deg_df_annot2.pval<-deg_df_annot2 
+
+
+deg_ids <- deg_df_annot2.pval %>% pull(gene_id) %>% unique()
 norm_sub <- norm_counts[rownames(norm_counts) %in% deg_ids, , drop = FALSE]
 
 #get metadata
@@ -825,14 +857,14 @@ p_rel_1 <- ggplot(expr_rel_plot %>% filter(timepoint == tp),
   theme(strip.text = element_text(face = "bold", size = 9),
         axis.text.x = element_text(angle = 45, hjust = 1),
         legend.position = "none")
- 
-ggsave(file.path(path.out,'DEG_cat_expression_plots_sub_withFC1.svg'),height = 6, width=8)
+p_rel_1
+ggsave(file.path(path.out,'DEG_cat_expression_plots.svg'),height = 6, width=8)
 
 ```
 
 ```{r}
 #pull out some specific plots
-cats<-c('immune system','membrane transport', 'signaling')
+cats<-c('immunity','sensory/neuronal', 'oxylipin signaling', 'mitocondria', 'signaling', "stress response", "extracellular matrix", "growth and differentiation")
 dd.plot<-expr_rel_plot %>% filter(timepoint == tp) %>% filter(category %in% cats) %>% mutate(cateogry=fct_drop(category))
 end_labels.sub<-end_labels%>% filter(category %in% cats) %>% mutate(cateogry=fct_drop(category))
 
@@ -865,12 +897,12 @@ sub_plots<- ggplot(dd.plot,
         axis.text.x = element_text(angle = 45, hjust = 1),
         legend.position = "none")
 sub_plots
-ggsave(file.path(path.out,'DEG_cat_expression_plots_multi_analygous_controls.svg'),height = 3.5, width=7)
+ggsave(file.path(path.out,'DEG_cat_expression_plots_sub.svg'),height = 6, width=7)
 ```
 
 ```{r}
 #pull out some specific plots for both timepoints
-cats<-c('Other/Uncategorized')
+#cats<-c('immunity','sensory/neuronal', 'stress response', 'oxylipin signaling')
 dd.plot<-expr_rel_plot %>% filter(category %in% cats) %>% mutate(cateogry=fct_drop(category))
 end_labels.sub<-end_labels%>% filter(category %in% cats) %>% mutate(cateogry=fct_drop(category))
 
@@ -905,8 +937,7 @@ sub_plots<- ggplot(dd.plot,
         axis.text.x = element_text(angle = 45, hjust = 1),
         legend.position = "none")
 sub_plots
-ggsave(file.path(path.out,'DEG_cat_expression_plots_uncategorized.svg'),height = 3.5, width=3)
-```
+ggsave(file.path(path.out,'DEG_cat_expression_plots_subs.svg'),height = 6, width=7)
 ```
 
 
