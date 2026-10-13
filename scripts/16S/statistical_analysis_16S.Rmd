@@ -1,7 +1,7 @@
 ---
 title: "statistical_analysis_16SrRNA"
 author: "Maggie Sogin"
-date: "June 9 2026"
+date: "Oct 13 2026"
 output:
   html_document:
     number_sections: true
@@ -92,7 +92,7 @@ rare_out <- rarecurve(otu_mat, step = 50, tidy = TRUE)
 
 # 3. Merge rarefaction data with your sample metadata
 rare_data <- rare_out %>%
-    rename(SampleID = Site, Reads = Sample, Observed_ASVs = Species) %>%
+    dplyr::rename(SampleID = Site, Reads = Sample, Observed_ASVs = Species) %>%
     left_join(rownames_to_column(metadata, var = "SampleID"), by = "SampleID")
 
 # 4. Plot using ggplot2, coloring by your group (e.g., TreatmentGroup)
@@ -153,7 +153,7 @@ Community composition over time
 ```{r}
 set.seed(1392)
 
-ps.analysis<-ps.rare  %>% ps_filter(dpi != "-1") #%>%  ps_filter(treatment != "FASW") 
+ps.analysis<-ps.rare  %>% ps_filter(dpi != "-1") 
 
 #reset factor level variables
 sample_data(ps.analysis)$timepoint<-factor(sample_data(ps.analysis)$timepoint,levels=c("post_priming","post_ABS","1dpi","4dpi",'14dpi','21dpi'), ordered=T)
@@ -172,18 +172,6 @@ nmds.mod@ord$stress
 #####plot
 ```{r}
 library(ggstar)
-# n1<-nmds.mod %>%
-#   ord_plot(shape=NA) + 
-#   #scale_shape_manual(values=shpPal)+
-#   theme_bw() +
-#   stat_chull(
-#     mapping = aes(colour = treatment, linetype = dpi,fill=treatment),
-#     linewidth = 0.5, alpha = 0.25, show.legend = FALSE)+
-#   geom_point(mapping=aes(color=treatment, shape=dpi),size=4,alpha=0.7)+
-#   scale_fill_manual(values=myPal)+
-#   scale_color_manual(values=myPal)+
-#   scale_shape_manual(values=shpPal, guide=guide_legend(reverse=T))+
-# n1
 
 n1 <- nmds.mod %>%
 ord_plot(shape=NA) +
@@ -207,63 +195,7 @@ guide = guide_legend(reverse = TRUE)
 )
 n1
 ```
-```{r}
-# NMDS site scores + metadata
-nmds_scores <- vegan::scores(nmds.mod@ord, display = "sites") %>%
-  as.data.frame() %>%
-  rownames_to_column("sample_id") %>%
-  left_join(data.frame(sample_data(ps.analysis)) %>% rownames_to_column("sample_id"),
-            by = "sample_id") %>% 
-    mutate(dpi = factor(as.character(dpi), levels = c("0", "1", "4", "14", "21")))
 
-# range (min, max) and median of each axis per treatment x dpi
-nmds_ranges <- nmds_scores %>%
-  group_by(treatment, dpi) %>%
-  summarise(across(c(NMDS1, NMDS2),
-                   list(min = min, max = max, med = median)),
-            .groups = "drop") %>%
-  mutate(dpi = droplevels(dpi))
-
-# shared axis limits so the side bars line up with the ordination
-x_lims <- range(nmds_scores$NMDS1)
-y_lims <- range(nmds_scores$NMDS2)
-
-side_theme <- theme_bw() +
-  theme(panel.grid.minor = element_blank(),
-        panel.grid.major.x = element_blank(),
-        legend.position = "none")
-
-# top bar: NMDS1 range, one row per dpi, dodged by treatment
-nmds1_bar <- ggplot(nmds_ranges, aes(y = dpi, color = treatment)) +
-  geom_linerange(aes(xmin = NMDS1_min, xmax = NMDS1_max),
-                 position = position_dodge(width = 0.8), linewidth = 0.8) +
-  #geom_point(aes(x = NMDS1_med), position = position_dodge(width = 0.8), size = 1.2) +
-  scale_color_manual(values = myPal) +
-  coord_cartesian(xlim = x_lims) +
-  labs(x = NULL, y = "dpi") +
-  side_theme +
-  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
-        panel.grid.major.x = element_line(color = "gray90"),
-        panel.grid.major.y = element_blank())
-
-# right bar: NMDS2 range, one column per dpi, dodged by treatment
-nmds2_bar <- ggplot(nmds_ranges, aes(x = dpi, color = treatment)) +
-  geom_linerange(aes(ymin = NMDS2_min, ymax = NMDS2_max),
-                 position = position_dodge(width = 0.8), linewidth = 0.8) +
- #geom_point(aes(y = NMDS2_med), position = position_dodge(width = 0.8), size = 1.2) +
-  scale_color_manual(values = myPal) +
-  coord_cartesian(ylim = y_lims) +
-  labs(x = "dpi", y = NULL) +
-  side_theme +
-  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(),
-        panel.grid.major.y = element_line(color = "gray90"))
-
-# combine: side bars on top (NMDS1) and right (NMDS2)
-n1_sidebars <- nmds1_bar + plot_spacer() +
-  (n1 + coord_cartesian(xlim = x_lims, ylim = y_lims)) + nmds2_bar +
-  plot_layout(ncol = 2, widths = c(4, 1.2), heights = c(1.2, 4), guides = "collect")
-n1_sidebars
-```
 ```{r}
 # NMDS site scores + metadata
 nmds_scores <- vegan::scores(nmds.mod@ord, display = "sites") %>%
@@ -332,30 +264,8 @@ n1_sidebars
 facet by timepoint
 
 ```{r}
-dpi_labels <- c("1" = "1 dpi", "4" = "4 dpi", "14" = "14 dpi", "21" = "21 dpi", "0"="0 dpi","-1"="pre-inc")
+dpi_labels<-c('0'="0 dpi",'1'="1 dpi","4"="4 dpi","14"="14 dpi","21"="21 dpi")
 
-n_s1 <- nmds.mod %>%
-  ord_plot(shape=NA) + 
-  scale_shape_manual(values=shpPal)+
-  theme_bw() +
-  stat_chull(
-    mapping = aes(colour = treatment, linetype = dpi,fill=treatment),
-    linewidth = 0.5, alpha = 0.25, show.legend = FALSE)+
-  geom_point(mapping=aes(color=treatment, shape=dpi),size=4,alpha=0.7)+
-  scale_fill_manual(values=myPal)+
-  scale_color_manual(values=myPal)+
-  scale_shape_manual(values=shpPal, guide=guide_legend(reverse=T))+
-  facet_grid(~ dpi,
-             labeller = labeller(dpi = dpi_labels)) +
- theme(
-    strip.background = element_blank(),
-    strip.text       = element_text(face = "bold"),
-    panel.grid.major = element_blank(),
-    panel.grid.minor = element_blank()
-  )
-n_s1
-```
-```{r}
 n_s1 <- nmds.mod %>%
 ord_plot(shape=NA) +
 theme_bw() +
@@ -403,184 +313,49 @@ Significant interaction between treatment and time, suggests priority effects of
 ```{r}
 print(permanova)
 ```
-
-#### Within-group variation (distance to centroid)
-Same approach as betadisper: each sample's Bray-Curtis distance to the centroid of its own treatment × dpi group. One value per sample, so no pseudo-replication from pairwise distances.
-```{r}
-bc_dist <- dist_get(nmds.mod)
-bc_meta <- data.frame(sample_data(ps.analysis)) %>%
-  rownames_to_column("sample_id") %>%
-  mutate(dpi = droplevels(dpi),
-         treatment = droplevels(treatment))
-
-# make sure metadata rows are in the same order as the distance matrix
-bc_meta <- bc_meta[match(labels(bc_dist), bc_meta$sample_id), ]
-bc_groups <- interaction(bc_meta$treatment, bc_meta$dpi, drop = TRUE)
-
-bd_trt_dpi <- betadisper(bc_dist, bc_groups, type = "centroid")
-
-bc_disp <- bc_meta %>%
-  mutate(dist_to_centroid = bd_trt_dpi$distances)
-
-permutest(bd_trt_dpi, permutations = 9999)
-```
-
-```{r}
-bc_disp_plot <- ggplot(bc_disp, aes(x = dpi, y = dist_to_centroid, fill = treatment, color = treatment)) +
-  geom_boxplot(alpha = 0.5, outlier.shape = NA, position = position_dodge2(preserve = "single")) +
-  geom_jitter(position = position_dodge2(0.75, preserve = "single"), size = 1.5) +
-  scale_fill_manual(values = myPal) +
-  scale_color_manual(values = myPal) +
-  labs(x = "Days post inoculation", y = "Bray-Curtis distance\nto group centroid") +
-  theme_new +
-  theme(legend.title = element_blank())
-bc_disp_plot
-```
-
-
-##### Betadispersion
+#### Betadispersion
 "do some treatment × dpi combinations have more variable communities than others?"
 ```{r}
 dist<-dist_get(nmds.mod)
 groups<-interaction(nmds.mod@sam_data$treatment, nmds.mod@sam_data$dpi)
-bd <- betadisper(dist, groups)
+bd <- betadisper(dist, groups, sqrt.dist = T)
 anova(bd)          # overall test
 permutest(bd)      # permutation-based, more robust
 ```
-
-```{r}
-#run pairwise comparison 
-tukey_result <- TukeyHSD(bd)
-# Extract the pairwise comparisons table
-tukey_table <- as.data.frame(tukey_result$group)
-# Sort by p-value lowest first
-tukey_table <- tukey_table[order(tukey_table$`p adj`), ]
-tukey_table
-```
 ```{r}
 plot(bd)
-boxplot(bd, las = 2)
 ```
-
-
-# FAVA analysis 
-From https://maikemorrison.github.io/FAVA/
-Goal of FAVA is to quantify compositional variability in a dataset across treatments using an FST appraoch
-https://maikemorrison.github.io/FAVA/articles/microbiome_tutorial.html
-
-## prep data
-```{r}
-library(FAVA)
-#select data
-ps.exp.ra<-microbiome::transform(ps.exp, "compositional")
-ps.analysis<-ps.exp.ra %>% ps_filter(dpi != "-1")
-
-my_data<-relab_phyloseq(ps.analysis) %>% 
-  dplyr::select(-is.neg,-Index,-LibrarySize,-sample_or_control, -sample.names3,-sample.names2,-DNA_conc_ng_ul) %>%
-  mutate(treatment=as.vector(treatment), dpi=as.numeric(as.vector(dpi))) %>% arrange(dpi)
-
-str(my_data)
-```
-```{r}
-# Confirm that your samples each sum to 1
-# if columns 4 through 10 contain the relevant categories
-# and columns 1, 2, and 3 contain metadata
-rowSums(my_data[,c(5:ncol(my_data))])
-```
-## check matrixs match
-```{r}
-# specify tree
-tree <- phy_tree(ps.analysis)
-
-#get phylogenetic distances
-distance_matrix <- ape::cophenetic.phylo(tree)
-
-#similarity matrix
-similarity_matrix = exp(-distance_matrix)
-
-# alternative similarity matrices:
-# similarity_matrix = 1/(distance_matrix + 1)
-# similarity_matrix = 1 - distance_matrix/max(distance_matrix)
-
-# Get the names of the species in your relative abundance matrix
-species_order <- colnames(my_data[,c(5:ncol(my_data))])
-
-# Confirm that the entries of the similarity matrix
-# correspond to relative abundance matrix
-all(species_order == colnames(similarity_matrix))
-all(species_order == rownames(similarity_matrix))
-
-# If they do not, you can re-order the rows and columns of
-# your similarity matrix to match your data:
-# similarity_matrix_reordered = similarity_matrix[species_order, species_order]
-
-# confirm that all diagonal elements are still 1
-diag(similarity_matrix)
-```
-## run analysis
-### visualize relative abudnances 
-```{r}
-set.seed(1)
-nr<-length(5:ncol(my_data))
-species_palette = viridis::turbo(nr)[sample(1:nr)] %>%
-  `names<-`(colnames(my_data)[-c(1:5)])
-
-# Make a ggplot2 stacked bar plot
-plot_relabund(my_data,
-              group = "treatment",
-              arrange = "vertical",
-              K = nr) +
-# Specify a custom color scheme
-  ggplot2::scale_color_manual(values = species_palette) +
-  ggplot2::scale_fill_manual(values = species_palette)
-```
-### compute unweighted FAVA
-```{r}
-fava.out<-fava(relab_matrix = my_data,
-     group = c("treatment","dpi"),
-     K = nr, normalized = T)
-```
-#### plot FAVA
-higher values of FAVA mean treatment is more variable at that time point vs. lower values of FAVA. 
 
 ```{r}
-fa<-ggplot(fava.out, aes(x = dpi, y = FAVA,color=treatment)) + 
-  geom_point(size = 3) + 
-    geom_line()+
-  scale_color_manual(values=myPal)+
-  theme_new
-fa
+# distance to centroid per sample + metadata
+bd_df <- data.frame(sample_id = names(bd$distances),
+                    dist_to_centroid = bd$distances) %>%
+  left_join(data.frame(sample_data(nmds.mod)) %>% rownames_to_column("sample_id"),
+            by = "sample_id") %>%
+  mutate(dpi = factor(as.character(dpi), levels = c("0", "1", "4", "14", "21")),
+         treatment = factor(as.character(treatment),
+                            levels = c("FASW", "ABS", "ISOABC", "labrenzia", "ruegeria", "vibrio")))
+
+dpi_labels_bd <- c("0" = "0 dpi", "1" = "1 dpi", "4" = "4 dpi", "14" = "14 dpi", "21" = "21 dpi")
+
+bd_plot <- ggplot(bd_df, aes(x = treatment, y = dist_to_centroid, fill = treatment, color = treatment)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA, width = 0.7) +
+  geom_jitter(width = 0.15, height = 0, size = 1.8) +
+  facet_grid(~ dpi, scales = "free_x", space = "free_x",
+             labeller = labeller(dpi = dpi_labels_bd)) +
+  scale_fill_manual(values = myPal) +
+  scale_color_manual(values = myPal) +
+  labs(x = NULL, y = "Distance to centroid\n(Bray-Curtis)") +
+  theme_new +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank())
+bd_plot
 ```
-FAVA tells us that the ABS samples at the start of the experiment are most variable across individuals, while toward the end of the experiment vibrio has the most variation in the FAVA score. 
-- ABS consistent with past work; ABS induces disorganization of community during initial time points with highest variation on 4 dpi. Then the composition variation of the ABS samples converges as the community becomes more similar. 
-- FASW stays similar across experiment 
-- for most bac inoculation treatments FAVA score increases 4 DPI but then levels off, except vibrio
-- Vibrio FAVA score increases and keeps increasing suggesting Vibrio had the longest impact on the variation of the community in the experiment
-
-#### bootstrap
-change this to include similarity matrix as well 
-
-To determine if these differences in variability levels are statistically significant, we employ bootstrapping, a computational method used to generate a null distribution against which to test statistical hypotheses.
-```{r}
-#bootstrap_out <- bootstrap_fava(relab_matrix = my_data,
-#                               n_replicates = 500,  
-#                               seed = 3,
-#                               group = c("treatment","dpi"),
-#                               K = nr)
-```
-get pvalues
-```{r}
-#str(bootstrap_out, max.level = 1)
-#bootstrap_out$P_values %>% arrange(P_value)
-```
-
-plot results
-```{r}
-#bootstrap_out$bootstrap_distribution_plot
-```
-
-
-
 
 # ANCOM-BC2 Analysis
 
@@ -652,7 +427,7 @@ ancom_sig <- ancom_results_df %>% filter(diff == TRUE)
 ancom_sig %>% arrange(comparison, timepoint, q)
 ```
 
-## Visualize 
+## visualize 
 ```{r}
 # join taxonomy to get genus names instead of ASV IDs
 tax_df <- tax_table(ps.analysis) %>% 
@@ -680,7 +455,7 @@ ancom_sig_2 <- ancom_sig %>%
 ```{r}
 #reorder species, treatments and timepoints
 sig_species <- unique(ancom_sig_2$Species_short)
-priority_species<-c("Roseibium aggregatum","Epibacterium scottomollicae","Vibrio alginolyticus")
+priority_species<-c("Roseibium aggregatum_A_ISOA","Epibacterium mobile_ISOB","Vibrio alginolyticus_ISOC")
 
 other_species  <- sort(setdiff(unique(ancom_sig_2$Species_short), priority_species))
 ancom_sig_2   <- ancom_sig_2 %>%
@@ -692,25 +467,68 @@ ancom_sig_2   <- ancom_sig_2 %>%
 
 
 ```{r}
-diff_taxa<-ggplot(ancom_sig_2, aes(x = timepoint, y = Species_short, fill = lfc)) +
-  geom_tile(color = "white", linewidth = 0.4) +
-  geom_text(aes(label = sig_label), size = 4, vjust = 0.75) +
+# ANCOM was run on ASVs, so several ASVs can share a name (e.g. "Rhodobacteraceae Family");
+# number them so each ASV gets its own row instead of overlapping
+taxon_labels <- ancom_sig_2 %>%
+  distinct(taxon, Species_short) %>%
+  group_by(Species_short) %>%
+  mutate(label = if (n() > 1) paste0(Species_short, " ", row_number()) else as.character(Species_short)) %>%
+  ungroup()
+
+# inoculant species shown first, in this order
+heat_priority <- c("Roseibium aggregatum_A_ISOA", "Epibacterium mobile_ISOB", "Vibrio alginolyticus_ISOC")
+
+label_levels <- taxon_labels %>%
+  mutate(prio_order = match(as.character(Species_short), heat_priority)) %>%
+  arrange(is.na(prio_order), prio_order, label) %>%
+  pull(label)
+
+# fill in every species x timepoint x treatment cell so the full grid is drawn
+# (cells that were not significant stay empty/grey)
+heat_df <- ancom_sig_2 %>%
+  left_join(taxon_labels, by = c("taxon", "Species_short")) %>%
+  dplyr::select(label, timepoint, comparison2, lfc, sig_label) %>%
+  mutate(label = factor(label, levels = rev(label_levels)),
+         timepoint = factor(as.character(timepoint), levels = c("1dpi", "4dpi", "14dpi", "21dpi"))) %>%
+  complete(label, timepoint, comparison2)
+
+# symmetric colour limits so 0 sits at white
+lfc_max <- max(abs(heat_df$lfc), na.rm = TRUE)
+
+# line separating the inoculant species (top) from the rest
+n_other <- sum(!as.character(taxon_labels$Species_short) %in% heat_priority)
+
+diff_taxa <- ggplot(heat_df, aes(x = timepoint, y = label, fill = lfc)) +
+  geom_tile(color = "gray75", linewidth = 0.3) +
+  geom_text(aes(label = sig_label), size = 3.5, vjust = 0.75, color = "gray10", na.rm = TRUE) +
+  geom_hline(yintercept = n_other + 0.5, linewidth = 0.6, color = "gray30") +
   facet_grid(~ comparison2) +
   scale_fill_gradient2(
-    low = "#2166AC", mid = "white", high = "#B2182B",
-    midpoint = 0, name = "Log Fold\nChange vs ABS"
+    low = "#2166AC", mid = "white", high = "#B2182B", midpoint = 0,
+    limits = c(-lfc_max, lfc_max), na.value = "gray97",
+    name = "Log fold change\nvs ABS",
+    guide = guide_colorbar(barheight = unit(4, "cm"), barwidth = unit(0.4, "cm"),
+                           frame.colour = "gray40", ticks.colour = "gray40")
   ) +
-  scale_x_discrete(limits = c("1dpi", "4dpi", "14dpi", "21dpi")) +
-  theme_bw() +
+  scale_x_discrete(labels = c("1dpi" = "1", "4dpi" = "4", "14dpi" = "14", "21dpi" = "21"),
+                   expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  coord_fixed() +
+  labs(x = "Days post inoculation", y = NULL) +
+  theme_new +
   theme(
-    axis.text.y      = element_text(size = 8, face = "italic"),
-    axis.text.x      = element_text(angle = 45, hjust = 1),
-    strip.text       = element_text(face = "bold"),
+    panel.grid       = element_blank(),
+    panel.border     = element_rect(color = "gray30", fill = NA, linewidth = 0.6),
+    panel.spacing    = unit(6, "pt"),
+    axis.ticks       = element_blank(),
+    axis.text.y      = element_text(size = 10, face = "italic"),
+    axis.text.x      = element_text(size = 10),
+    axis.title.x     = element_text(size = 10),
+    strip.text       = element_text(face = "bold", size = 10),
     strip.background = element_blank(),
-    panel.grid       = element_blank()
-  ) +
-  labs(x = "Timepoint", y = "Species",
-       title = "Differentially Abundant Taxa vs ABS")
+    legend.title     = element_text(size = 10),
+    legend.text      = element_text(size = 9)
+  )
 diff_taxa
 ```
 - This is plotting the deferentially abundant taxa as logfold 2 change between treatment and ABS where red is higher in treatment and blue is higher in ABS samples for each timepoint
@@ -725,79 +543,6 @@ diff_taxa
 - Vibrio -> diff abundance at 1 and 4 dpi
   - at end of expeirment, altermonas portus diff abundance 
 - In all inoculation vs. abs samples, acorss most timepoints see sig depletion of Shimia species, including shimia aestuarii, s. haliotis
-
-  
-
-```{r}
-#get sig species names
-sig_species_full <- unique(ancom_sig_2$Species)
-priority_species<-c("Roseibium aggregatum_A(RS_GCF_001999245_1)","Epibacterium scottomollicae(RS_GCF_003003215_1)","Vibrio alginolyticus(RS_GCF_000354175_2)")
-
-#extract rel abundance for sig. species
-relabund_heat<- psmelt(ps_get(ps.relAbund)) %>%
-  filter(Species %in% sig_species_full) %>%
-  filter(timepoint %in% c("1dpi", "4dpi", "14dpi", "21dpi")) %>%
-  filter(treatment %in% c('ABS' ,'ISOABC', 'labrenzia' ,'ruegeria' ,'vibrio')) %>% 
-  group_by(Species, treatment, timepoint) %>%
-  summarise(mean_rel_abund = mean(Abundance, na.rm = TRUE), .groups = "drop")
-
-# join significance labels from ancom_sig
-sig_overlay <- ancom_sig_2 %>%
-  mutate(treatment = str_remove(comparison, "_vs_ABS")) %>% 
-  dplyr::select(Species, timepoint, treatment, sig_label)
-
-#join sig levels and rel abundance 
-relabund_heat.sig_overlay <- relabund_heat %>%
-  left_join(sig_overlay, by = c("Species", "timepoint", "treatment")) %>%
-  mutate(sig_label = replace_na(sig_label, ""))
-
-# z-score each genus across all treatment/timepoint combinations
-df.heat <- relabund_heat.sig_overlay %>%
-  group_by(Species) %>%
-  mutate(zscore = scale(mean_rel_abund)[, 1]) %>%
-  ungroup()
-
-# fix ordering of species, treatments, and get short species names 
-df.heat<-df.heat %>%  #get short names
-         mutate(Species_short = gsub("\\(.*\\)", "", Species),   # drop accession
-         Species_short = gsub("_A$|_B$", "", Species_short),  # drop _A/_B suffixes if unwanted
-         Species_short = trimws(Species_short))
-
-# reorder species: priority species first, then remaining alphabetically
-priority.sp<-c("Epibacterium scottomollicae","Roseibium aggregatum","Vibrio alginolyticus")
-other.sp<-sort(setdiff(unique(df.heat$Species_short), priority.sp))
-
-# reorder things
-df.heat <-df.heat %>% 
-          mutate(Species_short=factor(Species_short,levels=rev(c(priority.sp,other.sp)))) %>% 
-          mutate(timepoint=factor(timepoint, levels=c('1dpi','4dpi','14dpi','21dpi')),
-                 treatment=factor(treatment,levels=c('ABS' ,'ISOABC', 'labrenzia' ,'ruegeria' ,'vibrio')))
-
-ggplot(df.heat, aes(x = timepoint, y = Species_short, fill = mean_rel_abund)) +
-  geom_tile(color = "white", linewidth = 0.4) +
-  geom_text(aes(label = sig_label), size = 3.5, vjust = 0.75, color = "black") +
-  facet_wrap(~ treatment, nrow = 1) +
-  scale_fill_gradientn(
-    colours  = c("white", "#FED976", "#FD8D3C", "#E31A1C", "#800026"),
-    name     = "Mean\nRelative\nAbundance",
-    labels   = scales::percent_format(accuracy = 0.1),
-    na.value = "grey90"
-  ) +
-  theme_bw() +
-  theme(
-    axis.text.x      = element_text(angle = 45, hjust = 1),
-    axis.text.y      = element_text(size = 8, face = "italic"),
-    strip.text       = element_text(face = "bold"),
-    strip.background = element_blank(),
-    panel.grid       = element_blank(),
-    legend.title     = element_text(size = 9)
-  ) +
-  labs(x = "Timepoint", y = "Species",
-       title    = "Relative Abundance of Differentially Abundant Taxa",
-       subtitle = "Asterisks indicate significance Treatment vs ABS (ANCOM-BC2)")
-```
-In the entire experiment, there were 30 bacterial species / ASVs that were sig different between treatment and time point comparisons. 
-
 
 
 # Barplot
@@ -869,6 +614,12 @@ library(patchwork)
 n1_sidebars
 ggsave(file.path(path.out,'Fig3.svg'),width=8, height=6,units = "in" )
 ```
+```{r}
+bd_plot
+ggsave(file.path(path.out,'FigS2.svg'),width=11, height=6,units = "in" )
+```
+
+
 
 ```{r}
 diff_taxa 
@@ -879,7 +630,7 @@ ggsave(file.path(path.out,'Fig4.svg'),width=10, height=8,units = "in" )
 
 ```{r}
 bar
-ggsave(file.path(path.out,'barplot.pdf'),units = 'in',width = 16,height=7)
+ggsave(file.path(path.out,'FigS1.svg'),units = 'in',width = 16,height=7)
 ```
 
 
@@ -888,17 +639,6 @@ ggsave(file.path(path.out,'barplot.pdf'),units = 'in',width = 16,height=7)
 ### nmds faceted plot
 ```{r}
 n_s1
-ggsave(file.path(path.out,'FigSX_nmds_facets.pdf'),units = 'in',width = 8,height=4)
+ggsave(file.path(path.out,'FigS3.pdf'),units = 'in',width = 8,height=4)
 ```
 
-### FAVA analysis 
-```{r}
-fa
-ggsave(file.path(path.out,'FigSX_fava.pdf'),units = 'in',width = 5,height=3.5)
-```
-
-### Diff Abund taxa
-```{r}
-diff_taxa + ggtitle('ANCOM Sig Taxa: Trt vs. ABS')
-ggsave(file.path(path.out,'FigSX_diffABund.pdf'),units = 'in',width = 10,height=5)
-```

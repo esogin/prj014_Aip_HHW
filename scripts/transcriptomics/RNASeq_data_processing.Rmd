@@ -99,13 +99,13 @@ hisat2_sum <- read.delim(file.path(path.in,"hisat2_alignment_summary.tsv"))
 organism_counts <- read.delim(file.path(path.in,"per_reference_counts.tsv"))
 
 # SortMeRNA rRNA removal summary
-sortme_sum <- read.delim(file.path(path.in,"sortmerna_summary.tsv"))
+sortme_sum <- read.delim(file.path(path.in,"sortmerna_summary.tsv")) #can't find this
 
 # Fastp trimming summary
-fastp_sum <- read.delim(file.path(path.in,"fastp_summary_per_sample.tsv"), check.names = FALSE)
+fastp_sum <- read.delim(file.path(path.in,"fastp_summary_per_sample.tsv"), check.names = FALSE) #can't find this
 
 # Aiptasia gene annotations (SwissProt/TrEMBL BLAST, GO, KEGG)
-aip_annotate <- read.delim(file.path(path.in,"Aiptasia_annotation_file.csv"))
+aip_annotate <- read.delim(file.path(path.in,"Aiptasia_annotation_file.csv")) #can't find this
 length(aip_annotate$Protein_ID)
 ```
 

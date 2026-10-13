@@ -189,10 +189,80 @@ samps.sizes<-data.frame(sample_data(ps.exp)) %>% group_by(treatment, timepoint) 
 samps.sizes 
 ```
 
+## Add in tax ids for specific isolates
+isolates 16S rRNA seqs were pulled from WGS for each isolate (ABC)
+```{r}
+library(Biostrings)
+library(pwalign)   # pairwiseAlignment() lives here in Bioconductor >= 3.19
+
+# ---- settings ----
+iso_fasta   <- "/Users/emsogin/Library/CloudStorage/Box-Box/Sogin Lab/data_repository/Prj014_Aip_HH/analysis/RAnalysis/data/16S/isolate_reference_16S.fasta"   # headers: ">ID Genus species_tag", one entry per 16S copy
+min_pid     <- 99.9                # % identity to call an ASV the isolate (99.9 = <=1 mismatch over ~1450 bp)
+min_cov     <- 0.95                # fraction of the ASV length that must align
+
+# ---- read isolate 16S copies ----
+iso <- readDNAStringSet(iso_fasta)
+iso_info <- tibble(header = names(iso)) %>%
+  mutate(iso_id  = word(header, 1),
+         Genus   = word(header, 2),
+         Species = word(header, 2, -1))   # "Genus species_tag"
+names(iso) <- iso_info$iso_id
+
+# ---- align every ASV to every isolate copy (both orientations) ----
+asv <- refseq(ps.exp)
+mat <- nucleotideSubstitutionMatrix(match = 1, mismatch = -3, baseOnly = FALSE)
+
+hits <- map_dfr(seq_along(iso), function(i) {
+  map_dfr(list(fwd = iso[[i]], rc = reverseComplement(iso[[i]])), function(subj) {
+    aln <- pairwiseAlignment(asv, subj, type = "global-local",
+                             substitutionMatrix = mat, gapOpening = 5, gapExtension = 2)
+    tibble(ASV    = names(asv),
+           iso_id = names(iso)[i],
+           pid    = pid(aln, type = "PID1"),
+           cov    = nchar(aln) / width(asv))
+  })
+})
+
+# near-misses worth looking at (close, but below the threshold)
+hits %>%
+  filter(pid >= 99, pid < min_pid, cov >= min_cov) %>%
+  arrange(dplyr::desc(pid))
+
+# best isolate hit per ASV, passing identity + coverage thresholds
+iso_matches <- hits %>%
+  filter(pid >= min_pid, cov >= min_cov) %>%
+  group_by(ASV) %>%
+  slice_max(pid, n = 1, with_ties = TRUE) %>%
+  left_join(iso_info, by = "iso_id") %>%
+  dplyr::summarise(Genus      = dplyr::first(Genus),
+                   Species    = paste(unique(Species), collapse = "/"),
+                   best_pid   = max(pid),
+                   iso_copies = paste(iso_id, collapse = ","),
+                   .groups = "drop")
+
+iso_matches   # check these before overwriting anything
+```
+```{r}
+tax_table(ps.exp)[iso_matches$ASV]
+```
+
+
+
+```{r}
+# ---- write into the phyloseq tax_table ----
+tt <- tax_table(ps.exp)
+tt[iso_matches$ASV, "Genus"]   <- iso_matches$Genus
+tt[iso_matches$ASV, "Species"] <- iso_matches$Species
+tax_table(ps.exp) <- tt
+
+# keep a record of which ASVs were re-annotated
+write_csv(iso_matches, "/Users/emsogin/Library/CloudStorage/Box-Box/Sogin Lab/data_repository/Prj014_Aip_HH/analysis/RAnalysis/output/16S/isolate_ASV_matches.csv")
+```
+
 
 ## Save phyloseq object
 ```{r}
-saveRDS(ps.exp, file='../data/16S/ps.exp.samples.rds')
+saveRDS(ps.exp, file='/Users/emsogin/Library/CloudStorage/Box-Box/Sogin Lab/data_repository/Prj014_Aip_HH/analysis/RAnalysis/data/16S/ps.exp.samples.rds')
 ```
 
 # Mock data analysis
