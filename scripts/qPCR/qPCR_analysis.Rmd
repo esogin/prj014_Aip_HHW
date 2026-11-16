@@ -1338,6 +1338,204 @@ dddl + iso063 + iso056 + plot_layout()
 ggsave(file.path(results_dir,'qPCR_plot.svg'), height=4, width=12)
 ```
 
+tidy way?
+```{r}
+
+# 1. Sample-level table: one row per sample x gene
+gene_long <- post_inoc %>%
+  select(sample_number, sample_name, treatment, sampling_day,
+         ef1a_mean_copynum,
+         ends_with("_mean_copynum_clean"), ends_with("_norm")) %>%
+  pivot_longer(
+    cols = c(ends_with("_mean_copynum_clean"), ends_with("_norm")),
+    names_to = c("gene", ".value"),
+    names_pattern = "^(.*?)_(mean_copynum_clean|norm)$"
+  ) %>%
+  rename(copy_number = mean_copynum_clean,
+         norm_copy_number = norm) %>%
+  filter(gene %in% target_names) %>%
+  mutate(gene_label = paste0(gene, " (",
+                             map_chr(gene, ~ target_genes[[.x]]$organism), ")"))
+
+# 2. Group x timepoint summary for each gene
+gene_summary <- gene_long %>%
+  filter(!is.na(norm_copy_number)) %>%
+  group_by(gene, gene_label, treatment, sampling_day) %>%
+  summarise(
+    n             = n(),
+    mean_copy     = mean(copy_number, na.rm = TRUE),
+    se_copy       = sd(copy_number, na.rm = TRUE) / sqrt(n),
+    mean_norm     = mean(norm_copy_number),
+    se_norm       = sd(norm_copy_number) / sqrt(n),
+    .groups = "drop"
+  )
+```
+
+```{r}
+# Highest point per gene (for spacing the asterisks)
+y_ranges <- gene_summary %>%
+  group_by(gene) %>%
+  summarise(y_range = max(mean_norm + coalesce(se_norm, 0), na.rm = TRUE),
+            .groups = "drop")
+
+# Highest point per gene x timepoint
+timepoint_max <- gene_summary %>%
+  group_by(gene, sampling_day) %>%
+  summarise(tp_max = max(mean_norm + coalesce(se_norm, 0), na.rm = TRUE),
+            .groups = "drop")
+
+# Significance annotations (vs ABS) for all genes at once
+sig_annotations <- dunn_table %>%
+  filter(gene %in% target_names,
+         group1 == "ABS" | group2 == "ABS",
+         sig != "") %>%
+  mutate(treatment    = factor(ifelse(group1 == "ABS", group2, group1),
+                               levels = levels(post_inoc$treatment)),
+         sampling_day = factor(day, levels = post_inoc_days)) %>%
+  left_join(timepoint_max, by = c("gene", "sampling_day")) %>%
+  left_join(y_ranges, by = "gene") %>%
+  left_join(distinct(gene_summary, gene, gene_label), by = "gene") %>%
+  group_by(gene, sampling_day) %>%
+  mutate(sig_rank = row_number()) %>%
+  ungroup() %>%
+  mutate(sig_y = tp_max + y_range * 0.03 + (sig_rank - 1) * y_range * 0.05)
+
+# Plot
+line_plot <- ggplot(gene_summary,
+       aes(x = sampling_day, y = mean_norm,
+           color = treatment, group = treatment)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = pmax(mean_norm - se_norm, 0),
+                    ymax = mean_norm + se_norm),
+                width = 0.2, linewidth = 0.5) +
+  geom_text(data = sig_annotations,
+            aes(label = sig, y = sig_y),
+            size = 7, fontface = "bold", show.legend = FALSE) +
+  facet_wrap(~ gene_label, scales = "free_y", ncol = 1) +
+  scale_color_manual(values = palette, drop = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.10))) +
+  labs(x = "Days Post-Inoculation",
+       y = "Target gene / Ef1a (normalized abundance)",
+       color = "Treatment",
+       title = "Normalized Gene Abundance Over Time",
+       caption = "Asterisks = significant vs ABS (Dunn's, BH-adjusted p < 0.05). Error bars = ± SE.") +
+  theme_bw(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top",
+        plot.caption = element_text(size = 10, hjust = 0),
+        strip.text = element_text(face = "bold"))
+
+line_plot
+```
+
+
+```{r}
+line_plots <- map(set_names(target_names), ~
+  line_plot %+% filter(gene_summary, gene == .x) +
+    geom_text(data = filter(sig_annotations, gene == .x),
+              aes(label = sig, y = sig_y),
+              size = 7, fontface = "bold", show.legend = FALSE) +
+    facet_null() +
+    labs(title = paste0(target_genes[[.x]]$organism, " — ", .x,
+                        " Normalized Abundance Over Time"),
+         y = paste0(.x, " / Ef1a (normalized abundance)"))
+)
+line_plots
+```
+
+
+```{r}
+# ---- Settings ----
+sigma_val <- 1e-4   # pseudo-log: linear below ~sigma, log10 above
+pl_trans  <- scales::pseudo_log_trans(sigma = sigma_val, base = 10)
+
+# ---- Axis helpers ----
+# Labeled breaks: 0, then 1, 2, 5 x 10^n up to each facet's max
+pl_breaks <- function(lims) {
+  hi <- ceiling(log10(max(lims[2], sigma_val)))
+  lo <- floor(log10(sigma_val))
+  c(0, as.vector(outer(c(1, 2, 5), 10^(lo:hi))))
+}
+
+# Unlabeled minor ticks at every 1-9 x 10^n
+pl_minor <- function(lims) {
+  hi <- ceiling(log10(max(lims[2], sigma_val)))
+  lo <- floor(log10(sigma_val))
+  as.vector(outer(1:9, 10^(lo:hi)))
+}
+
+# Plain decimal labels (no scientific notation)
+pl_labels <- function(x) {
+  out <- vapply(x, function(v) format(v, scientific = FALSE, drop0trailing = TRUE,
+                                      trim = TRUE, big.mark = ","),
+                character(1))
+  ifelse(is.na(x), "", out)
+}
+
+# ---- Error bar limits ----
+gene_summary_log <- gene_summary %>%
+  mutate(ymin_log = pmax(mean_norm - coalesce(se_norm, 0), 0),
+         ymax_log = mean_norm + coalesce(se_norm, 0))
+
+# ---- Highest point per gene x timepoint ----
+timepoint_max <- gene_summary_log %>%
+  group_by(gene, sampling_day) %>%
+  summarise(tp_max = max(ymax_log, na.rm = TRUE), .groups = "drop")
+
+# ---- Significance annotations (vs ABS) ----
+sig_annotations <- dunn_table %>%
+  filter(gene %in% target_names,
+         group1 == "ABS" | group2 == "ABS",
+         sig != "") %>%
+  mutate(treatment    = factor(ifelse(group1 == "ABS", group2, group1),
+                               levels = levels(post_inoc$treatment)),
+         sampling_day = factor(day, levels = post_inoc_days)) %>%
+  left_join(timepoint_max, by = c("gene", "sampling_day")) %>%
+  left_join(distinct(gene_summary, gene, gene_label), by = "gene") %>%
+  group_by(gene, sampling_day) %>%
+  mutate(sig_rank = row_number()) %>%
+  ungroup() %>%
+  mutate(sig_y = pl_trans$inverse(pl_trans$transform(tp_max) +
+                                    0.15 + (sig_rank - 1) * 0.25))
+
+# ---- Plot ----
+line_plot_log <- ggplot(gene_summary_log,
+       aes(x = sampling_day, y = mean_norm,
+           color = treatment, group = treatment)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  geom_errorbar(aes(ymin = ymin_log, ymax = ymax_log),
+                width = 0.2, linewidth = 0.5) +
+  geom_text(data = sig_annotations,
+            aes(label = sig, y = sig_y),
+            size = 7, fontface = "bold", show.legend = FALSE) +
+  facet_wrap(~ gene_label, scales = "free_y", ncol = 1) +
+  scale_color_manual(values = palette, drop = FALSE) +
+  scale_y_continuous(trans = pl_trans,
+                     breaks = pl_breaks,
+                     minor_breaks = pl_minor,
+                     labels = pl_labels,
+                     expand = expansion(mult = c(0.05, 0.10))) +
+  guides(y = guide_axis(minor.ticks = TRUE)) +
+  labs(x = "Days Post-Inoculation",
+       y = "Target gene / Ef1a (normalized abundance, pseudo-log scale)",
+       color = "Treatment",
+       title = "Normalized Gene Abundance Over Time",
+       caption = "Asterisks = significant vs ABS (Dunn's, BH-adjusted p < 0.05). Error bars = ± SE.") +
+  theme_bw(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top",
+        plot.caption = element_text(size = 10, hjust = 0),
+        strip.text = element_text(face = "bold"),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank())
+
+line_plot_log
+#ggsave(file.path(results_dir,'qPCR_plot_v2.svg'), height=8, width=4)
+
+```
+
 
 
 ## 7.2 Abundance Heatmaps
