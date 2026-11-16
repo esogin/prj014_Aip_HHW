@@ -254,6 +254,36 @@ plot_figS1
 ```
 
 ```{r}
+organism_counts
+write.csv(organism_counts, file.path(path.out,'organism_mapping_counts.csv'))
+
+```
+
+```{r}
+plot.df
+write.csv(plot.df, file.path(path.out,'percent_mapped_persample.csv'))
+```
+
+```{r}
+# Mean % Symbiodinium reads per treatment x timepoint
+symb_means <- plot.df %>%
+  filter(organism == "Symbiodinium") %>%
+  group_by(timepoint, treatment) %>%
+  summarise(mean_pct = mean(pct_mapped, na.rm = TRUE), .groups = "drop")
+
+# Fold change for every treatment pair within each timepoint
+symb_fc <- inner_join(symb_means, symb_means, by = "timepoint",
+                      suffix = c("_1", "_2"),
+                      relationship = "many-to-many") %>%
+  filter(as.integer(treatment_1) < as.integer(treatment_2)) %>%
+  mutate(FC     = mean_pct_1 / mean_pct_2,
+         log2FC = log2(FC))
+
+symb_fc
+```
+
+
+```{r}
 unique(plot.df$treatment)
 
 # ---- Project palette & theme ----

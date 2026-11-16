@@ -483,6 +483,23 @@ degs_of_interest.ex<-degs_of_interest %>%
 dim(degs_of_interest.ex)
 ```
 
+```{r}
+#nr of unique proteins
+length(unique(degs_of_interest.ex$Protein_ID))
+```
+```{r}
+#duplicated
+dups<-degs_of_interest.ex[duplicated(degs_of_interest.ex$Protein_ID),] %>% arrange(Protein_ID)
+dups
+dups$geneid
+length(unique(dups$Protein_ID))
+```
+```{r}
+degs_of_interest.ex.1dpi<-degs_of_interest.ex[timepoint=='1dpi',] %>% arrange(Protein_ID)
+length(unique(degs_of_interest.ex.1dpi$Protein_ID))
+```
+
+
 ###3.5.4 Annotations classifications of degs of interest
 
 ```{r}
@@ -501,8 +518,8 @@ category_keywords<-list(
   "Ion channel" = c('SLC38A6'),
   "Oxylipin signaling" = c('trp-1','TRPC6'),
   "Metabolism" =c("CYP3A24","hyuA","ca2"),
-  "Oxidative stress"=c("TP53I3","Hao1","CYBB"),
-  "Sulfur metabolism"=c("mocos","TST"),
+  "Oxidative stress"=c("TP53I3","Hao1","CYBB","mocos"),
+  "Sulfur metabolism"=c("TST"),
   "Lipid metabolism" =c("hsd17b12","PLA2G4A"),
   "Signaling" = c("SCOP1","Plch2","PRKX","Vwde"),
   "Transcription regulation" = c('Elk1','ZNF510','ANKRD12','KLF8','NKX1-1'),
@@ -1039,6 +1056,9 @@ p_rel_1 <- ggplot(plot_df  %>% filter(timepoint == tp) %>% filter(!category=='NA
 p_rel_1
 ggsave(file.path(path.out,'DEG_cat_expression_plots_1dpi.svg'),height = 8, width=10)
 ```
+
+
+
 ```{r}
 ##  Plot
 tp<-"21dpi"
