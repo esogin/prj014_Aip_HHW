@@ -413,7 +413,7 @@ annot <- aip_annotate %>%
     geneid = coalesce(gene_name, entry_name, accession)
   ) %>%
   dplyr::select(Protein_ID, gene_id, Source, geneid, accession, entry_name, gene_name,Hit.description, GO.terms)
-annot
+head(annot)
 ```
 
 
@@ -495,7 +495,7 @@ dups$geneid
 length(unique(dups$Protein_ID))
 ```
 ```{r}
-degs_of_interest.ex.1dpi<-degs_of_interest.ex[timepoint=='1dpi',] %>% arrange(Protein_ID)
+degs_of_interest.ex.1dpi<-degs_of_interest.ex %>% filter(timepoint=='1dpi') %>% arrange(Protein_ID)
 length(unique(degs_of_interest.ex.1dpi$Protein_ID))
 ```
 
@@ -633,7 +633,6 @@ ggplot(df, aes(x = treatment, y = log2FoldChange, color = direction)) +
   ) + ylim(c(-3,4))
 
 ggsave(file.path(path.out,'deg_geneplot_control.svg'),height = 6, width=4)
-
 ```
 
 #### ABSs vs. Treatment
@@ -688,92 +687,6 @@ ggsave(file.path(path.out,'deg_geneplot_trt.svg'),height = 6, width=6)
 - Plot DEGs from each treatment (Labrenzia, Reugeria, Vibrio and Mult) excluding those in ABS vs FASW for all comparisons 
 - Filter genes with padj < 0.05
 - We are not plotting DEGs bewteen ASW and FASW as these genes dominate expression differences in system 
-
-#### 1 dpi
-```{r}
-timepoint_label<-'1dpi'
-vsd<-vsd_aip
-
-sig_genes<-deg %>% 
-                    filter(timepoint==timepoint_label) %>% 
-                    mutate(Protein_ID=paste0(Protein_ID,"_gene")) %>% 
-                    pull(Protein_ID)
-
-#get mat and transform to z-score
-mat<-assay(vsd[, vsd$timepoint == timepoint_label])[sig_genes, ] 
-mat_z<-t(scale(t(mat)))
-mat<-mat[complete.cases(mat_z),]
-
-title<-cat(timepoint_label, "union DEGs:", length(sig_genes), "->", nrow(mat_z), "plotted\n")
-
-# Column annotation
-ann_col <- data.frame(
-    Treatment = vsd[, vsd$timepoint == timepoint_label]$treatment,
-    row.names = colnames(mat_z))
-
-#row annotations
-row_lab <- deg$geneid[match(rownames(mat_z), paste0(deg$Protein_ID,"_gene"))]
-
-p <- pheatmap(mat_z,
-    annotation_col = ann_col,
-    annotation_colors = list(
-    Treatment = palette),
-    show_rownames = TRUE,
-    show_colnames = F,
-    labels_row = row_lab,
-    fontsize_row = 5.5,
-    #kmeans_k=3,
-    cutree_rows = 3,
-    cutree_cols = 4,
-    main = paste0("DEGs, Aiptasia ", timepoint_label,
-                  " (", nrow(mat_z), " genes), Z-score"),
-    silent = TRUE)
-grid::grid.newpage(); grid::grid.draw(p$gtable)
-
-```
-#### 21 dpi
-```{r}
-timepoint_label<-'21dpi'
-vsd<-vsd_aip
-
-sig_genes<-deg %>% 
-                    filter(timepoint==timepoint_label) %>% 
-                    mutate(Protein_ID=paste0(Protein_ID,"_gene")) %>% 
-                    pull(Protein_ID)
-
-#get mat and transform to z-score
-mat<-assay(vsd[, vsd$timepoint == timepoint_label])[sig_genes, ] 
-mat_z<-t(scale(t(mat)))
-mat<-mat[complete.cases(mat_z),]
-
-title<-cat(timepoint_label, "union DEGs:", length(sig_genes), "->", nrow(mat_z), "plotted\n")
-
-# Column annotation
-ann_col <- data.frame(
-    Treatment = vsd[, vsd$timepoint == timepoint_label]$treatment,
-    row.names = colnames(mat_z))
-
-#row annotations
-row_lab <- annot$gene_name[match(rownames(mat_z), paste0(annot$Protein_ID,"_gene"))]
-
-p <- pheatmap(mat_z,
-    annotation_col = ann_col,
-    annotation_colors = list(
-    Treatment = palette),
-    show_rownames = TRUE,
-    show_colnames = F,
-    labels_row = row_lab,
-    fontsize_row = 5.5,
-    #kmeans_k=3,
-    cutree_rows = 3,
-    cutree_cols = 4,
-    main = paste0("DEGs, Aiptasia ", timepoint_label,
-                  " (", nrow(mat_z), " genes), Z-score"),
-    silent = TRUE)
-grid::grid.newpage(); grid::grid.draw(p$gtable)
-
-```
-###3.6.3 Heatmaps wiht annotated functions
 
 #### 1 dpi
 
